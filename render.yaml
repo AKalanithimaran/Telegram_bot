@@ -1,0 +1,16 @@
+﻿services:
+  - type: web
+    name: telegram-pvp-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 src/main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
