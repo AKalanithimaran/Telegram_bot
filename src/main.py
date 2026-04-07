@@ -13,7 +13,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789"))
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+PORT = int(os.getenv("PORT", "1000"))
 
 def get_db_connection() -> psycopg.Connection:
     if DATABASE_URL:
@@ -399,9 +400,16 @@ def main() -> None:
     app.add_handler(CommandHandler("accept", accept_command))
     app.add_handler(CommandHandler("result", result_command))
     app.add_handler(CommandHandler("resolve", resolve_command))
-
-    app.run_polling()
-
+    
+    if WEBHOOK_URL:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL.rstrip('/')}/{BOT_TOKEN}",
+        )
+    else:
+        app.run_polling()
 
 if __name__ == "__main__":
     main()
