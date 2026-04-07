@@ -11,10 +11,15 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789"))
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
-PORT = int(os.getenv("PORT", "1000"))
+PORT = int(os.getenv("PORT", "10000"))
+
+try:
+    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "6204931777").strip())
+except ValueError:
+    ADMIN_USER_ID = 6204931777
+
 
 def get_db_connection() -> psycopg.Connection:
     if DATABASE_URL:
@@ -390,7 +395,9 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing. Set BOT_TOKEN environment variable.")
 
+    print("Initializing database...")
     init_db()
+    print("Database initialized.")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -400,8 +407,9 @@ def main() -> None:
     app.add_handler(CommandHandler("accept", accept_command))
     app.add_handler(CommandHandler("result", result_command))
     app.add_handler(CommandHandler("resolve", resolve_command))
-    
+
     if WEBHOOK_URL:
+        print(f"Starting in webhook mode on port {PORT}...")
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -409,7 +417,14 @@ def main() -> None:
             webhook_url=f"{WEBHOOK_URL.rstrip('/')}/{BOT_TOKEN}",
         )
     else:
+        print("Starting in polling mode...")
         app.run_polling()
 
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"Startup error: {exc}")
+        raise
+
