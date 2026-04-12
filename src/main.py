@@ -1568,6 +1568,13 @@ async def match_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # 9. main() with ApplicationBuilder setup
+async def post_init(application: Application) -> None:
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Existing webhook cleared before polling startup.")
+    except TelegramError as exc:
+        logger.warning("Failed to clear webhook before polling: %s", exc)
+
 
 def main() -> None:
     if not BOT_TOKEN:
@@ -1576,7 +1583,7 @@ def main() -> None:
     init_db()
     logger.info("Database initialized at %s", DB_PATH)
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setmlbb", setmlbb_command))
