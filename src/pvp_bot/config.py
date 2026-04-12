@@ -13,6 +13,10 @@ DATA_DIR = BASE_DIR / "data"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", os.getenv("ADMIN_USER_ID", "6204931777")).strip())
 DB_PATH = os.getenv("DB_PATH", str(DATA_DIR / "pvp_bot.db")).strip()
+APP_MODE = os.getenv("APP_MODE", "auto").strip().lower()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
+PORT = int(os.getenv("PORT", "10000").strip())
 PLATFORM_FEE_RATE = float(os.getenv("PLATFORM_FEE_RATE", "0.05"))
 MIN_ENTRY_FEE = float(os.getenv("MIN_ENTRY_FEE", "0.5"))
 MIN_DEPOSIT = float(os.getenv("MIN_DEPOSIT", "0.5"))
@@ -35,3 +39,9 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
 )
 logger = logging.getLogger("pvp_bot")
+
+
+def resolved_app_mode() -> str:
+    if APP_MODE in {"polling", "webhook"}:
+        return APP_MODE
+    return "webhook" if WEBHOOK_URL else "polling"

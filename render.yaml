@@ -1,14 +1,23 @@
 services:
-  - type: worker
+  - type: web
     name: telegram-pvp-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: PYTHONPATH=src python3 -m pvp_bot
+    healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_ID
+        sync: false
+      - key: APP_MODE
+        value: webhook
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        sync: false
+      - key: PORT
         sync: false
       - key: DB_PATH
         value: /opt/render/project/src/data/pvp_bot.db

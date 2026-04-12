@@ -1,12 +1,11 @@
 import asyncio
-import traceback
 
 import httpx
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
-from .config import BOT_TOKEN, HTTP_TIMEOUT, logger
+from .config import BOT_TOKEN, HTTP_TIMEOUT, PORT, WEBHOOK_SECRET_TOKEN, WEBHOOK_URL, logger, resolved_app_mode
 from .database import init_db
 from .handlers import (
     accept_command,
@@ -48,6 +47,8 @@ async def force_delete_webhook() -> None:
 
 
 async def post_init(application: Application) -> None:
+    if resolved_app_mode() != "polling":
+        return
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Existing webhook cleared before polling startup.")
@@ -99,8 +100,23 @@ def main() -> None:
         raise RuntimeError("BOT_TOKEN is missing.")
     init_db()
     logger.info("Database initialized.")
+    application = build_application()
+    mode = resolved_app_mode()
+    logger.info("Bot starting in %s mode...", mode)
+    if mode == "webhook":
+        if not WEBHOOK_URL:
+            raise RuntimeError("WEBHOOK_URL is required for webhook mode.")
+        webhook_path = f"/telegram/{BOT_TOKEN}"
+        webhook_target = f"{WEBHOOK_URL}{webhook_path}"
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=webhook_path.lstrip("/"),
+            webhook_url=webhook_target,
+            secret_token=WEBHOOK_SECRET_TOKEN or None,
+            drop_pending_updates=True,
+        )
+        return
     asyncio.run(force_delete_webhook())
     asyncio.set_event_loop(asyncio.new_event_loop())
-    application = build_application()
-    logger.info("Bot starting...")
     application.run_polling(drop_pending_updates=True)
