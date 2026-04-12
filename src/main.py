@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -45,6 +46,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pvp_bot")
 
+
+
+
+async def force_delete_webhook() -> None:
+    if not BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            response = await client.post(url, data={"drop_pending_updates": "true"})
+            response.raise_for_status()
+            logger.info("Webhook delete request sent before polling startup.")
+    except Exception as exc:
+        logger.warning("Failed to delete webhook via direct API call: %s", exc)
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -1582,6 +1597,8 @@ def main() -> None:
 
     init_db()
     logger.info("Database initialized at %s", DB_PATH)
+
+    asyncio.run(force_delete_webhook())
 
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
