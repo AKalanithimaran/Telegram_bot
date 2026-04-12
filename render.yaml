@@ -4,12 +4,14 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python3 src/main.py
+    startCommand: PYTHONPATH=src python3 -m pvp_bot
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_ID
         sync: false
+      - key: DB_PATH
+        value: /opt/render/project/src/data/pvp_bot.db
       - key: PLATFORM_TON_WALLET
         sync: false
       - key: TONCENTER_API_KEY

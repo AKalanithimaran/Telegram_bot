@@ -1,5 +1,6 @@
-﻿# Secrets
+# Secrets
 .env
+.env.local
 
 # Python cache/bytecode
 __pycache__/
@@ -19,3 +20,7 @@ dist/
 # Tool caches
 .pytest_cache/
 .mypy_cache/
+
+# Local data
+data/*.db
+data/*.sqlite
