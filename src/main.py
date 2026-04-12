@@ -1599,6 +1599,7 @@ def main() -> None:
     logger.info("Database initialized at %s", DB_PATH)
 
     asyncio.run(force_delete_webhook())
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
