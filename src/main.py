@@ -1,904 +1,1612 @@
 import json
-import math
+import logging
 import os
-import random
-import secrets
+import sqlite3
 import time
-from contextlib import asynccontextmanager
-from pathlib import Path
+import uuid
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-import chess
-import psycopg
-import uvicorn
+import httpx
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from psycopg.rows import dict_row
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.constants import ChatType
+from telegram.error import TelegramError
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from tonsdk.contract.wallet import WalletVersionEnum, Wallets
+from tonsdk.utils import Address, bytes_to_b64str, to_nano
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
-PORT = int(os.getenv("PORT", "10000"))
-HTML_PATH = Path(__file__).with_name("chess.html")
+ADMIN_ID = int(os.getenv("ADMIN_ID", os.getenv("ADMIN_USER_ID", "6204931777")).strip())
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "pvp_bot.db")).strip()
+PLATFORM_FEE_RATE = float(os.getenv("PLATFORM_FEE_RATE", "0.05"))
+MIN_ENTRY_FEE = float(os.getenv("MIN_ENTRY_FEE", "0.5"))
+MIN_DEPOSIT = float(os.getenv("MIN_DEPOSIT", "0.5"))
+MIN_WITHDRAWAL = float(os.getenv("MIN_WITHDRAWAL", "0.5"))
+TONCENTER_BASE_URL = os.getenv("TONCENTER_BASE_URL", "https://toncenter.com/api/v2").rstrip("/")
+TONCENTER_API_KEY = os.getenv("TONCENTER_API_KEY", "").strip()
+PLATFORM_TON_WALLET = os.getenv("PLATFORM_TON_WALLET", "").strip()
+TON_WALLET_MNEMONIC = os.getenv("TON_WALLET_MNEMONIC", "").strip()
+TON_WALLET_VERSION = os.getenv("TON_WALLET_VERSION", "v4r2").strip().lower()
+TON_WALLET_WORKCHAIN = int(os.getenv("TON_WALLET_WORKCHAIN", "0"))
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "20"))
+PAYMENT_CHECK_LIMIT = int(os.getenv("PAYMENT_CHECK_LIMIT", "50"))
+MATCH_PAYMENT_WINDOW_MINUTES = int(os.getenv("MATCH_PAYMENT_WINDOW_MINUTES", "10"))
+MATCH_RESULT_REMINDER_MINUTES = int(os.getenv("MATCH_RESULT_REMINDER_MINUTES", "30"))
+MATCH_RESULT_DISPUTE_MINUTES = int(os.getenv("MATCH_RESULT_DISPUTE_MINUTES", "60"))
+CHESS_RESULT_SELECTION = os.getenv("CHESS_RESULT_SELECTION", "latest").strip().lower()
 
-try:
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "6204931777").strip())
-except ValueError:
-    ADMIN_USER_ID = 6204931777
-
-telegram_app: Optional[Application] = None
-polling_started = False
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+)
+logger = logging.getLogger("pvp_bot")
 
 
-def get_db_connection() -> psycopg.Connection:
-    if DATABASE_URL:
-        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
-    host = os.getenv("PGHOST", "").strip()
-    dbname = os.getenv("PGDATABASE", "").strip()
-    user = os.getenv("PGUSER", "").strip()
-    password = os.getenv("PGPASSWORD", "").strip()
-    port = os.getenv("PGPORT", "5432").strip()
-    sslmode = os.getenv("PGSSLMODE", "require").strip()
 
-    if not all([host, dbname, user, password]):
-        raise RuntimeError("Missing database configuration. Set DATABASE_URL or PGHOST/PGDATABASE/PGUSER/PGPASSWORD.")
+def utc_now_str() -> str:
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
-    return psycopg.connect(
-        host=host,
-        dbname=dbname,
-        user=user,
-        password=password,
-        port=port,
-        sslmode=sslmode,
-        row_factory=dict_row,
-    )
 
+def parse_db_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def format_ton(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def parse_ton_amount(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Amount must be a valid number.") from exc
+    if value <= 0:
+        raise ValueError("Amount must be greater than 0.")
+    return round(value, 8)
+
+
+def username_label(username: Optional[str], user_id: Optional[int] = None) -> str:
+    if username:
+        return username if username.startswith("@") else f"@{username}"
+    if user_id is not None:
+        return f"User {user_id}"
+    return "Unknown"
+
+
+def safe_username(user: Optional[Any]) -> str:
+    if not user:
+        return ""
+    if getattr(user, "username", None):
+        return f"@{user.username}"
+    full_name = getattr(user, "full_name", "") or ""
+    return full_name[:100]
+
+
+def is_private(update: Update) -> bool:
+    return bool(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE)
+
+
+def is_group(update: Update) -> bool:
+    return bool(update.effective_chat and update.effective_chat.type in {ChatType.GROUP, ChatType.SUPERGROUP})
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+# 1. Database init + all helper functions
 
 def init_db() -> None:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    mlbb_id TEXT
-                )
-                """
+    with closing(get_conn()) as conn, conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id                 INTEGER PRIMARY KEY,
+                username                TEXT,
+                mlbb_id                 TEXT,
+                wallet_balance          REAL    DEFAULT 0,
+                locked_balance          REAL    DEFAULT 0,
+                ton_address             TEXT,
+                is_verified             INTEGER DEFAULT 0,
+                wins                    INTEGER DEFAULT 0,
+                losses                  INTEGER DEFAULT 0,
+                disputes                INTEGER DEFAULT 0,
+                total_earned            REAL    DEFAULT 0,
+                created_at              TEXT    DEFAULT (datetime('now')),
+                verification_requested  INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS matches (
+                match_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                player1              INTEGER NOT NULL,
+                player2              INTEGER,
+                game                 TEXT    NOT NULL,
+                amount               TEXT    NOT NULL,
+                entry_fee            REAL    DEFAULT 0,
+                locked_amount        REAL    DEFAULT 0,
+                status               TEXT    DEFAULT 'waiting',
+                result1              TEXT,
+                result2              TEXT,
+                winner_id            INTEGER,
+                payout_sent          INTEGER DEFAULT 0,
+                created_at           TEXT    DEFAULT (datetime('now')),
+                group_chat_id        INTEGER,
+                started_at           TEXT,
+                player1_pay_mode     TEXT    DEFAULT 'wallet',
+                player2_pay_mode     TEXT    DEFAULT 'wallet',
+                player1_paid         REAL    DEFAULT 0,
+                player2_paid         REAL    DEFAULT 0,
+                challenge_message_id INTEGER,
+                payment_notice_sent  INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS transactions (
+                tx_hash         TEXT    PRIMARY KEY,
+                user_id         INTEGER,
+                amount          REAL,
+                type            TEXT,
+                status          TEXT    DEFAULT 'pending',
+                created_at      TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS processed_tx (
+                tx_hash         TEXT    PRIMARY KEY
+            );
+            """
+        )
+
+        # Migrations for older databases.
+        user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        if "username" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        if "wallet_balance" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN wallet_balance REAL DEFAULT 0")
+        if "locked_balance" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN locked_balance REAL DEFAULT 0")
+        if "ton_address" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN ton_address TEXT")
+        if "is_verified" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0")
+        if "wins" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN wins INTEGER DEFAULT 0")
+        if "losses" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN losses INTEGER DEFAULT 0")
+        if "disputes" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN disputes INTEGER DEFAULT 0")
+        if "total_earned" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN total_earned REAL DEFAULT 0")
+        if "created_at" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN created_at TEXT DEFAULT (datetime('now'))")
+        if "verification_requested" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN verification_requested INTEGER DEFAULT 0")
+
+        match_columns = {row[1] for row in conn.execute("PRAGMA table_info(matches)")}
+        for column_sql in [
+            ("entry_fee", "ALTER TABLE matches ADD COLUMN entry_fee REAL DEFAULT 0"),
+            ("locked_amount", "ALTER TABLE matches ADD COLUMN locked_amount REAL DEFAULT 0"),
+            ("winner_id", "ALTER TABLE matches ADD COLUMN winner_id INTEGER"),
+            ("payout_sent", "ALTER TABLE matches ADD COLUMN payout_sent INTEGER DEFAULT 0"),
+            ("created_at", "ALTER TABLE matches ADD COLUMN created_at TEXT DEFAULT (datetime('now'))"),
+            ("group_chat_id", "ALTER TABLE matches ADD COLUMN group_chat_id INTEGER"),
+            ("started_at", "ALTER TABLE matches ADD COLUMN started_at TEXT"),
+            ("player1_pay_mode", "ALTER TABLE matches ADD COLUMN player1_pay_mode TEXT DEFAULT 'wallet'"),
+            ("player2_pay_mode", "ALTER TABLE matches ADD COLUMN player2_pay_mode TEXT DEFAULT 'wallet'"),
+            ("player1_paid", "ALTER TABLE matches ADD COLUMN player1_paid REAL DEFAULT 0"),
+            ("player2_paid", "ALTER TABLE matches ADD COLUMN player2_paid REAL DEFAULT 0"),
+            ("challenge_message_id", "ALTER TABLE matches ADD COLUMN challenge_message_id INTEGER"),
+            ("payment_notice_sent", "ALTER TABLE matches ADD COLUMN payment_notice_sent INTEGER DEFAULT 0"),
+        ]:
+            if column_sql[0] not in match_columns:
+                conn.execute(column_sql[1])
+
+
+def ensure_user_record(user_id: int, username: str = "") -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            """
+            INSERT INTO users (user_id, username, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
+            """,
+            (user_id, username, utc_now_str()),
+        )
+
+
+def sync_user_from_update(update: Update) -> None:
+    if not update.effective_user:
+        return
+    ensure_user_record(update.effective_user.id, safe_username(update.effective_user))
+
+
+def get_user(user_id: int) -> Optional[sqlite3.Row]:
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+
+
+def get_match(match_id: int) -> Optional[sqlite3.Row]:
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,)).fetchone()
+
+
+def get_recent_matches_for_user(user_id: int, limit: int = 10) -> list[sqlite3.Row]:
+    with closing(get_conn()) as conn:
+        return conn.execute(
+            """
+            SELECT * FROM matches
+            WHERE player1 = ? OR player2 = ?
+            ORDER BY match_id DESC
+            LIMIT ?
+            """,
+            (user_id, user_id, limit),
+        ).fetchall()
+
+
+def get_user_match_stats(user_id: int) -> dict[str, float]:
+    with closing(get_conn()) as conn:
+        total_matches = conn.execute(
+            "SELECT COUNT(*) FROM matches WHERE (player1 = ? OR player2 = ?) AND status IN ('completed', 'dispute')",
+            (user_id, user_id),
+        ).fetchone()[0]
+        total_lost = conn.execute(
+            """
+            SELECT COALESCE(SUM(entry_fee), 0)
+            FROM matches
+            WHERE status = 'completed'
+              AND payout_sent = 1
+              AND winner_id IS NOT NULL
+              AND winner_id != ?
+              AND (player1 = ? OR player2 = ?)
+            """,
+            (user_id, user_id, user_id),
+        ).fetchone()[0]
+    return {"total_matches": total_matches, "total_lost": float(total_lost or 0)}
+
+
+def create_transaction(tx_hash: str, user_id: Optional[int], amount: float, tx_type: str, status: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO transactions (tx_hash, user_id, amount, type, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (tx_hash, user_id, amount, tx_type, status, utc_now_str()),
+        )
+
+
+def processed_tx_exists(tx_hash: str) -> bool:
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT 1 FROM processed_tx WHERE tx_hash = ?", (tx_hash,)).fetchone() is not None
+
+
+def mark_processed_tx(tx_hash: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute("INSERT OR IGNORE INTO processed_tx (tx_hash) VALUES (?)", (tx_hash,))
+
+
+def update_user_verification(user_id: int, is_verified: int, verification_requested: int = 0) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "UPDATE users SET is_verified = ?, verification_requested = ? WHERE user_id = ?",
+            (is_verified, verification_requested, user_id),
+        )
+
+
+def set_user_mlbb(user_id: int, mlbb_id: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET mlbb_id = ? WHERE user_id = ?", (mlbb_id, user_id))
+
+
+def set_user_ton_address(user_id: int, ton_address: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET ton_address = ? WHERE user_id = ?", (ton_address, user_id))
+
+
+def adjust_user_balances(user_id: int, wallet_delta: float = 0.0, locked_delta: float = 0.0, earned_delta: float = 0.0) -> None:
+    with closing(get_conn()) as conn, conn:
+        row = conn.execute(
+            "SELECT wallet_balance, locked_balance, total_earned FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("User not found.")
+        new_wallet = round(float(row["wallet_balance"] or 0) + wallet_delta, 8)
+        new_locked = round(float(row["locked_balance"] or 0) + locked_delta, 8)
+        new_earned = round(float(row["total_earned"] or 0) + earned_delta, 8)
+        if new_wallet < -1e-9 or new_locked < -1e-9:
+            raise ValueError("Balance operation would make balances negative.")
+        conn.execute(
+            "UPDATE users SET wallet_balance = ?, locked_balance = ?, total_earned = ? WHERE user_id = ?",
+            (max(new_wallet, 0.0), max(new_locked, 0.0), max(new_earned, 0.0), user_id),
+        )
+
+
+def lock_wallet_entry(user_id: int, amount: float, reference: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        row = conn.execute("SELECT wallet_balance, locked_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            raise ValueError("User not found.")
+        available = float(row["wallet_balance"] or 0)
+        if available + 1e-9 < amount:
+            raise ValueError("Insufficient wallet balance.")
+        conn.execute(
+            "UPDATE users SET wallet_balance = ?, locked_balance = ? WHERE user_id = ?",
+            (round(available - amount, 8), round(float(row["locked_balance"] or 0) + amount, 8), user_id),
+        )
+    create_transaction(f"match_entry:{reference}:{user_id}", user_id, -amount, "match_entry", "confirmed")
+
+
+def release_locked_amount(user_id: int, amount: float, credit_to_wallet: bool, reference: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        row = conn.execute("SELECT wallet_balance, locked_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            raise ValueError("User not found.")
+        new_locked = round(float(row["locked_balance"] or 0) - amount, 8)
+        if new_locked < -1e-9:
+            new_locked = 0.0
+        new_wallet = float(row["wallet_balance"] or 0)
+        if credit_to_wallet:
+            new_wallet = round(new_wallet + amount, 8)
+        conn.execute(
+            "UPDATE users SET wallet_balance = ?, locked_balance = ? WHERE user_id = ?",
+            (new_wallet, max(new_locked, 0.0), user_id),
+        )
+    if credit_to_wallet:
+        create_transaction(f"match_payout:{reference}:{user_id}", user_id, amount, "match_payout", "confirmed")
+
+
+def update_match_after_challenge(match_id: int, message_id: Optional[int]) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "UPDATE matches SET challenge_message_id = ? WHERE match_id = ?",
+            (message_id, match_id),
+        )
+
+
+def store_match_result(match_id: int, user_id: int, result: str) -> None:
+    with closing(get_conn()) as conn, conn:
+        match = conn.execute("SELECT player1, player2 FROM matches WHERE match_id = ?", (match_id,)).fetchone()
+        if not match:
+            raise ValueError("Match not found.")
+        if match["player1"] == user_id:
+            conn.execute("UPDATE matches SET result1 = ? WHERE match_id = ?", (result, match_id))
+        elif match["player2"] == user_id:
+            conn.execute("UPDATE matches SET result2 = ? WHERE match_id = ?", (result, match_id))
+        else:
+            raise ValueError("You are not part of this match.")
+
+
+def get_active_manual_matches(user_id: int) -> list[sqlite3.Row]:
+    with closing(get_conn()) as conn:
+        return conn.execute(
+            """
+            SELECT * FROM matches
+            WHERE status = 'active'
+              AND game IN ('mlbb', 'chess')
+              AND (player1 = ? OR player2 = ?)
+            ORDER BY match_id DESC
+            """,
+            (user_id, user_id),
+        ).fetchall()
+
+
+def set_match_status(match_id: int, status: str, **extra: Any) -> None:
+    parts = ["status = ?"]
+    values: list[Any] = [status]
+    for key, value in extra.items():
+        parts.append(f"{key} = ?")
+        values.append(value)
+    values.append(match_id)
+    with closing(get_conn()) as conn, conn:
+        conn.execute(f"UPDATE matches SET {', '.join(parts)} WHERE match_id = ?", values)
+
+
+def increment_dispute_stats(match: sqlite3.Row) -> None:
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET disputes = disputes + 1 WHERE user_id = ?", (match["player1"],))
+        if match["player2"]:
+            conn.execute("UPDATE users SET disputes = disputes + 1 WHERE user_id = ?", (match["player2"],))
+
+
+def finalize_match_payout(match_id: int, winner_id: int) -> tuple[sqlite3.Row, float]:
+    with closing(get_conn()) as conn, conn:
+        match = conn.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,)).fetchone()
+        if not match:
+            raise ValueError("Match not found.")
+        if match["payout_sent"]:
+            return match, 0.0
+        if winner_id not in {match["player1"], match["player2"]}:
+            raise ValueError("Winner must be one of the match players.")
+        entry_fee = float(match["entry_fee"] or 0)
+        gross = round(entry_fee * 2, 8)
+        payout = round(gross * (1 - PLATFORM_FEE_RATE), 8)
+
+        player1_paid = float(match["player1_paid"] or 0)
+        player2_paid = float(match["player2_paid"] or 0)
+        if player1_paid > 0 and match["player1_pay_mode"] == "wallet":
+            conn.execute(
+                "UPDATE users SET locked_balance = MAX(locked_balance - ?, 0) WHERE user_id = ?",
+                (player1_paid, match["player1"]),
             )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS matches (
-                    match_id BIGSERIAL PRIMARY KEY,
-                    player1 BIGINT,
-                    player2 BIGINT,
-                    game TEXT,
-                    amount INTEGER,
-                    status TEXT,
-                    result1 TEXT,
-                    result2 TEXT
-                )
-                """
+        if player2_paid > 0 and match["player2"] and match["player2_pay_mode"] == "wallet":
+            conn.execute(
+                "UPDATE users SET locked_balance = MAX(locked_balance - ?, 0) WHERE user_id = ?",
+                (player2_paid, match["player2"]),
             )
-            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS winner BIGINT")
-            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS chess_token TEXT")
-            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS chess_state TEXT")
-            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS chat_id BIGINT")
+
+        loser_id = match["player1"] if match["player2"] == winner_id else match["player2"]
+        conn.execute(
+            "UPDATE users SET wallet_balance = wallet_balance + ?, total_earned = total_earned + ?, wins = wins + 1 WHERE user_id = ?",
+            (payout, payout, winner_id),
+        )
+        if loser_id:
+            conn.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (loser_id,))
+
+        conn.execute(
+            """
+            UPDATE matches
+            SET status = 'completed', winner_id = ?, payout_sent = 1, locked_amount = 0
+            WHERE match_id = ?
+            """,
+            (winner_id, match_id),
+        )
+
+    create_transaction(f"match_payout:{match_id}:{winner_id}", winner_id, payout, "match_payout", "confirmed")
+    refreshed = get_match(match_id)
+    if refreshed is None:
+        raise ValueError("Match disappeared after payout.")
+    return refreshed, payout
 
 
-def is_private_chat(update: Update) -> bool:
-    return bool(update.effective_chat and update.effective_chat.type == "private")
+def refund_match(match_id: int) -> sqlite3.Row:
+    with closing(get_conn()) as conn, conn:
+        match = conn.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,)).fetchone()
+        if not match:
+            raise ValueError("Match not found.")
+        if match["status"] == "completed" and match["payout_sent"]:
+            raise ValueError("Completed match cannot be refunded.")
+
+        for player_key, pay_key, paid_key in [("player1", "player1_pay_mode", "player1_paid"), ("player2", "player2_pay_mode", "player2_paid")]:
+            user_id = match[player_key]
+            if not user_id:
+                continue
+            amount = float(match[paid_key] or 0)
+            if amount <= 0:
+                continue
+            pay_mode = match[pay_key] or "wallet"
+            user = conn.execute("SELECT wallet_balance, locked_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            if not user:
+                continue
+            wallet_balance = float(user["wallet_balance"] or 0)
+            locked_balance = float(user["locked_balance"] or 0)
+            if pay_mode == "wallet":
+                locked_balance = max(locked_balance - amount, 0.0)
+            wallet_balance = round(wallet_balance + amount, 8)
+            conn.execute(
+                "UPDATE users SET wallet_balance = ?, locked_balance = ? WHERE user_id = ?",
+                (wallet_balance, locked_balance, user_id),
+            )
+            create_transaction(f"match_payout:refund:{match_id}:{user_id}", user_id, amount, "match_payout", "confirmed")
+
+        conn.execute(
+            "UPDATE matches SET status = 'cancelled', payout_sent = 1, locked_amount = 0 WHERE match_id = ?",
+            (match_id,),
+        )
+
+    refunded = get_match(match_id)
+    if refunded is None:
+        raise ValueError("Match disappeared after refund.")
+    return refunded
 
 
-def is_group_chat(update: Update) -> bool:
-    return bool(update.effective_chat and update.effective_chat.type in {"group", "supergroup"})
+def choose_manual_result_match(user_id: int) -> Optional[sqlite3.Row]:
+    matches = get_active_manual_matches(user_id)
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    if CHESS_RESULT_SELECTION == "latest":
+        return matches[0]
+    return None
 
 
-def user_label(user_id: int) -> str:
-    return f"User {user_id}"
+def verification_status_text(user: sqlite3.Row) -> str:
+    if int(user["is_verified"] or 0) == 1:
+        return "✅ Verified"
+    if int(user["is_verified"] or 0) == -1:
+        return "⛔ Banned"
+    if int(user["verification_requested"] or 0) == 1:
+        return "⏳ Pending"
+    return "❌ Not Verified"
 
 
-async def group_user_display(update: Update, user_id: int) -> str:
-    try:
-        member = await update.effective_chat.get_member(user_id)
-        user = member.user
-        if user.username:
-            return f"@{user.username}"
-        if user.full_name:
-            return user.full_name
-    except Exception:
-        pass
-    return user_label(user_id)
+def can_use_paid_features(user: sqlite3.Row) -> tuple[bool, str]:
+    status = int(user["is_verified"] or 0)
+    if status == -1:
+        return False, "⛔ You have been banned. Contact admin."
+    if status != 1:
+        return False, "⚠️ You must be verified to use this feature.\nSend /verify to request approval from admin."
+    return True, ""
 
 
-def build_match_link(match_token: str, seat: str, auth: str) -> str:
-    if not WEBHOOK_URL:
-        return ""
-    base = WEBHOOK_URL.rstrip("/")
-    return f"{base}/chess/{match_token}?seat={seat}&auth={auth}"
+def prize_pool_text(entry_fee: float) -> str:
+    gross = entry_fee * 2
+    net = gross * (1 - PLATFORM_FEE_RATE)
+    return f"{format_ton(net)} TON"
 
 
-def build_chess_state(match_id: int, player1_id: int, player2_id: int, player1_name: str, player2_name: str) -> tuple[str, dict[str, Any]]:
-    token = secrets.token_urlsafe(18)
-    state = {
-        "match_id": match_id,
-        "status": "lobby",
-        "time_control": None,
-        "last_clock_update": None,
-        "turn": "white",
-        "fen": chess.STARTING_FEN,
-        "winner": None,
-        "result_reason": None,
-        "white": {
-            "id": player1_id,
-            "name": player1_name,
-            "joined": False,
-            "time_left": None,
-            "auth": secrets.token_urlsafe(12),
-        },
-        "black": {
-            "id": player2_id,
-            "name": player2_name,
-            "joined": False,
-            "time_left": None,
-            "auth": secrets.token_urlsafe(12),
-        },
-        "messages": ["Choose a time control to start the match."],
-    }
-    return token, state
-
-
-def load_chess_state(raw_state: Optional[str]) -> dict[str, Any]:
-    if not raw_state:
-        raise HTTPException(status_code=404, detail="Chess match state not found.")
-    return json.loads(raw_state)
-
-
-def save_chess_state(cur: psycopg.Cursor, match_id: int, state: dict[str, Any]) -> None:
-    cur.execute(
-        "UPDATE matches SET chess_state = %s WHERE match_id = %s",
-        (json.dumps(state), match_id),
+def challenge_post_text(match: sqlite3.Row, challenger: sqlite3.Row) -> str:
+    label = username_label(challenger["username"], challenger["user_id"])
+    entry_fee = float(match["entry_fee"] or 0)
+    if match["game"] == "mlbb":
+        return (
+            "🎮 MLBB 1v1 Challenge!\n\n"
+            f"👤 Player: {label}\n"
+            f"💰 Entry Fee: {format_ton(entry_fee)} TON\n"
+            f"🏆 Prize Pool: {prize_pool_text(entry_fee)}\n\n"
+            "Requirements:\n"
+            "✅ Must be verified\n"
+            "✅ Must have MLBB ID set\n"
+            f"✅ Must have {format_ton(entry_fee)} TON in wallet\n\n"
+            f"Use /accept {match['match_id']} to join!"
+        )
+    return (
+        "🎮 PvP Challenge!\n\n"
+        f"👤 Player: {label}\n"
+        f"💰 Entry Fee: {format_ton(entry_fee)} TON\n"
+        f"🎯 Game: {match['game']}\n"
+        f"🏆 Prize Pool: {prize_pool_text(entry_fee)}\n\n"
+        f"Use /accept {match['match_id']} to join!"
     )
 
 
-def get_seat_data(state: dict[str, Any], seat: str) -> dict[str, Any]:
-    if seat not in {"white", "black"}:
-        raise HTTPException(status_code=400, detail="Invalid seat.")
-    return state[seat]
+async def safe_reply(update: Update, text: str) -> None:
+    try:
+        if update.message:
+            await update.message.reply_text(text)
+    except TelegramError as exc:
+        logger.warning("Failed to reply in chat %s: %s", update.effective_chat.id if update.effective_chat else None, exc)
 
 
-def require_chess_auth(state: dict[str, Any], seat: str, auth: str) -> dict[str, Any]:
-    seat_data = get_seat_data(state, seat)
-    if seat_data["auth"] != auth:
-        raise HTTPException(status_code=403, detail="Invalid match link.")
-    return seat_data
+async def safe_send(bot, chat_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+    except TelegramError as exc:
+        logger.warning("Failed to send message to %s: %s", chat_id, exc)
 
 
-def board_from_state(state: dict[str, Any]) -> chess.Board:
-    return chess.Board(state["fen"])
+async def pin_message_if_possible(bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+    except TelegramError:
+        logger.info("Could not pin message in group %s", chat_id)
 
 
-def clock_snapshot(seconds: Optional[float]) -> Optional[int]:
-    if seconds is None:
+async def notify_admin(bot, text: str) -> None:
+    await safe_send(bot, ADMIN_ID, text)
+
+
+async def require_private(update: Update) -> bool:
+    if is_private(update):
+        return True
+    await safe_reply(update, "This command can only be used in private chat.")
+    return False
+
+
+async def require_group(update: Update) -> bool:
+    if is_group(update):
+        return True
+    await safe_reply(update, "This command can only be used in group chat.")
+    return False
+
+
+async def require_admin_private(update: Update) -> bool:
+    if not is_private(update):
+        await safe_reply(update, "This command only works in private chat.")
+        return False
+    if not update.effective_user or update.effective_user.id != ADMIN_ID:
+        await safe_reply(update, "Unauthorized.")
+        return False
+    return True
+
+
+async def get_current_user(update: Update) -> sqlite3.Row:
+    sync_user_from_update(update)
+    user = get_user(update.effective_user.id)
+    if user is None:
+        raise RuntimeError("User record could not be created.")
+    return user
+
+
+async def require_verified_user(update: Update) -> Optional[sqlite3.Row]:
+    user = await get_current_user(update)
+    allowed, message = can_use_paid_features(user)
+    if not allowed:
+        await safe_reply(update, message)
         return None
-    return max(0, int(math.ceil(seconds)))
+    return user
 
 
-def legal_moves_map(board: chess.Board) -> dict[str, list[str]]:
-    moves: dict[str, list[str]] = {}
-    for move in board.legal_moves:
-        from_square = chess.square_name(move.from_square)
-        to_square = chess.square_name(move.to_square)
-        moves.setdefault(from_square, [])
-        if move.promotion:
-            suffix = chess.piece_symbol(move.promotion)
-            moves[from_square].append(f"{to_square}:{suffix}")
-        else:
-            moves[from_square].append(to_square)
-    return moves
+async def post_waiting_challenge(bot, match_id: int) -> Optional[int]:
+    match = get_match(match_id)
+    if not match:
+        return None
+    challenger = get_user(match["player1"])
+    if not challenger:
+        return None
+    text = challenge_post_text(match, challenger)
+    try:
+        sent = await bot.send_message(chat_id=match["group_chat_id"], text=text)
+        update_match_after_challenge(match_id, sent.message_id)
+        await pin_message_if_possible(bot, match["group_chat_id"], sent.message_id)
+        return sent.message_id
+    except TelegramError as exc:
+        logger.warning("Failed to post challenge %s: %s", match_id, exc)
+        return None
 
 
-async def announce_winner(match: dict[str, Any], winner_id: Optional[int], text: str) -> None:
-    if not telegram_app:
-        return
-    chat_id = match.get("chat_id")
-    if not chat_id:
-        return
-    await telegram_app.bot.send_message(chat_id=chat_id, text=text)
+# 2. TonCenter API functions (deposit poll, withdraw send)
+
+def toncenter_headers() -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if TONCENTER_API_KEY:
+        headers["X-API-Key"] = TONCENTER_API_KEY
+    return headers
 
 
-async def complete_match(match_id: int, winner_id: Optional[int], status: str, state: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            chess_state_json = json.dumps(state) if state is not None else None
-            if chess_state_json is None:
-                cur.execute(
-                    "UPDATE matches SET status = %s, winner = %s WHERE match_id = %s RETURNING *",
-                    (status, winner_id, match_id),
-                )
-            else:
-                cur.execute(
-                    "UPDATE matches SET status = %s, winner = %s, chess_state = %s WHERE match_id = %s RETURNING *",
-                    (status, winner_id, chess_state_json, match_id),
-                )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Match not found.")
-            return row
+async def toncenter_get(path: str, params: Optional[dict[str, Any]] = None) -> Any:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=toncenter_headers()) as client:
+        response = await client.get(f"{TONCENTER_BASE_URL}/{path.lstrip('/')}", params=params or {})
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description") or "TonCenter request failed.")
+        return payload.get("result")
 
 
-async def resolve_chess_timeout(match: dict[str, Any], state: dict[str, Any], now: Optional[float] = None) -> tuple[dict[str, Any], bool]:
-    if state["status"] != "active" or not state["time_control"] or state["last_clock_update"] is None:
-        return state, False
-
-    now = now or time.time()
-    elapsed = max(0.0, now - float(state["last_clock_update"]))
-    turn = state["turn"]
-    seat_state = state[turn]
-    seat_state["time_left"] = max(0.0, float(seat_state["time_left"]) - elapsed)
-    state["last_clock_update"] = now
-
-    if seat_state["time_left"] <= 0:
-        winner_seat = "black" if turn == "white" else "white"
-        state["status"] = "completed"
-        state["winner"] = state[winner_seat]["id"]
-        state["result_reason"] = "timeout"
-        completed_match = await complete_match(match["match_id"], state[winner_seat]["id"], "completed", state)
-        await announce_winner(
-            completed_match,
-            state[winner_seat]["id"],
-            f"♟️ Chess Match Finished!\n\n🏆 Winner: {state[winner_seat]['name']}\nReason: Timeout",
-        )
-        return state, True
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            save_chess_state(cur, match["match_id"], state)
-    return state, False
+async def toncenter_post(path: str, json_body: dict[str, Any]) -> Any:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=toncenter_headers()) as client:
+        response = await client.post(f"{TONCENTER_BASE_URL}/{path.lstrip('/')}", json=json_body)
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description") or "TonCenter request failed.")
+        return payload.get("result")
 
 
-def serialize_chess_view(match: dict[str, Any], state: dict[str, Any], seat: str) -> dict[str, Any]:
-    board = board_from_state(state)
-    viewer = get_seat_data(state, seat)
-    return {
-        "match_id": match["match_id"],
-        "status": state["status"],
-        "time_control": state["time_control"],
-        "turn": state["turn"],
-        "fen": state["fen"],
-        "winner": state["winner"],
-        "result_reason": state["result_reason"],
-        "viewer_seat": seat,
-        "viewer_id": viewer["id"],
-        "white": {
-            "id": state["white"]["id"],
-            "name": state["white"]["name"],
-            "joined": state["white"]["joined"],
-            "time_left": clock_snapshot(state["white"]["time_left"]),
-        },
-        "black": {
-            "id": state["black"]["id"],
-            "name": state["black"]["name"],
-            "joined": state["black"]["joined"],
-            "time_left": clock_snapshot(state["black"]["time_left"]),
-        },
-        "messages": state.get("messages", []),
-        "legal_moves": legal_moves_map(board) if state["status"] == "active" else {},
-        "piece_map": {chess.square_name(square): piece.symbol() for square, piece in board.piece_map().items()},
+async def fetch_platform_transactions() -> list[dict[str, Any]]:
+    if not PLATFORM_TON_WALLET:
+        return []
+    result = await toncenter_get("getTransactions", {"address": PLATFORM_TON_WALLET, "limit": PAYMENT_CHECK_LIMIT})
+    return result if isinstance(result, list) else []
+
+
+async def fetch_platform_wallet_balance() -> float:
+    if not PLATFORM_TON_WALLET:
+        return 0.0
+    result = await toncenter_get("getAddressBalance", {"address": PLATFORM_TON_WALLET})
+    return round(int(result) / 1_000_000_000, 8)
+
+
+async def fetch_wallet_seqno(wallet_address: str) -> int:
+    result = await toncenter_get("getWalletInformation", {"address": wallet_address})
+    try:
+        return int(result.get("seqno", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+
+def wallet_version_enum() -> WalletVersionEnum:
+    version_map = {
+        "v3r2": WalletVersionEnum.v3r2,
+        "v4r2": WalletVersionEnum.v4r2,
     }
+    return version_map.get(TON_WALLET_VERSION, WalletVersionEnum.v4r2)
 
 
-def get_manual_mlbb_match(conn: psycopg.Connection, user_id: int) -> Optional[dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT *
-            FROM matches
-            WHERE status = 'active'
-              AND game = 'mlbb'
-              AND (player1 = %s OR player2 = %s)
-            ORDER BY match_id DESC
-            LIMIT 1
-            """,
-            (user_id, user_id),
-        )
-        return cur.fetchone()
+async def send_ton_withdrawal(amount: float, destination: str, comment: str) -> str:
+    if not TON_WALLET_MNEMONIC:
+        raise RuntimeError("TON_WALLET_MNEMONIC is not configured.")
+    mnemonics = [word for word in TON_WALLET_MNEMONIC.split() if word]
+    if len(mnemonics) < 12:
+        raise RuntimeError("TON_WALLET_MNEMONIC is invalid.")
+
+    try:
+        Address(destination)
+    except Exception as exc:
+        raise RuntimeError("Invalid TON address.") from exc
+
+    _mn, _pub, _priv, wallet = Wallets.from_mnemonics(mnemonics, wallet_version_enum(), TON_WALLET_WORKCHAIN)
+    wallet_address = wallet.address.to_string(True, True, True)
+    seqno = await fetch_wallet_seqno(wallet_address)
+    message = wallet.create_transfer_message(
+        destination,
+        to_nano(amount, "ton"),
+        seqno,
+        payload=comment,
+        send_mode=3,
+    )
+    boc = bytes_to_b64str(message["message"].to_boc(False))
+    result = await toncenter_post("sendBoc", {"boc": boc})
+    if isinstance(result, str) and result:
+        return result
+    if isinstance(result, dict):
+        for key in ("hash", "tx_hash", "@extra"):
+            value = result.get(key)
+            if value:
+                return str(value)
+    return f"withdraw:{uuid.uuid4().hex}"
 
 
+
+def extract_tx_hash(tx: dict[str, Any]) -> Optional[str]:
+    tx_id = tx.get("transaction_id") or {}
+    return tx.get("hash") or tx_id.get("hash")
+
+
+
+def extract_tx_comment(tx: dict[str, Any]) -> str:
+    in_msg = tx.get("in_msg") or {}
+    for candidate in (in_msg.get("message"), tx.get("comment")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    msg_data = in_msg.get("msg_data") or {}
+    for key in ("text", "body", "comment"):
+        value = msg_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+
+def extract_tx_amount(tx: dict[str, Any]) -> float:
+    in_msg = tx.get("in_msg") or {}
+    raw_value = in_msg.get("value") or tx.get("value") or 0
+    try:
+        return round(int(raw_value) / 1_000_000_000, 8)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+
+def transaction_is_incoming(tx: dict[str, Any]) -> bool:
+    in_msg = tx.get("in_msg") or {}
+    source = in_msg.get("source")
+    return bool(source)
+
+
+async def process_deposit_tx(application: Application, tx_hash: str, user_id: int, amount: float) -> None:
+    user = get_user(user_id)
+    if not user:
+        logger.info("Deposit memo for unknown user %s", user_id)
+        create_transaction(tx_hash, user_id, amount, "deposit", "failed")
+        mark_processed_tx(tx_hash)
+        return
+    if amount + 1e-9 < MIN_DEPOSIT:
+        create_transaction(tx_hash, user_id, amount, "deposit", "failed")
+        mark_processed_tx(tx_hash)
+        await safe_send(application.bot, user_id, f"⚠️ Deposit received but below minimum ({format_ton(MIN_DEPOSIT)} TON). It was not credited.")
+        return
+    adjust_user_balances(user_id, wallet_delta=amount)
+    create_transaction(tx_hash, user_id, amount, "deposit", "confirmed")
+    mark_processed_tx(tx_hash)
+    await safe_send(application.bot, user_id, f"✅ Deposit confirmed! +{format_ton(amount)} TON credited to your wallet.")
+    logger.info("Deposit credited: user=%s amount=%s tx=%s", user_id, amount, tx_hash)
+
+
+async def process_match_payment_tx(application: Application, tx_hash: str, match_id: int, amount: float) -> None:
+    match = get_match(match_id)
+    if not match or match["status"] != "pending_payment":
+        create_transaction(tx_hash, match["player1"] if match else None, amount, "match_entry", "failed")
+        mark_processed_tx(tx_hash)
+        return
+    expected = float(match["entry_fee"] or 0)
+    if amount + 1e-9 < expected:
+        create_transaction(tx_hash, match["player1"], amount, "match_entry", "failed")
+        mark_processed_tx(tx_hash)
+        await safe_send(application.bot, match["player1"], f"⚠️ Match payment for #{match_id} was below the required {format_ton(expected)} TON.")
+        return
+
+    set_match_status(
+        match_id,
+        "waiting",
+        locked_amount=expected,
+        player1_pay_mode="external",
+        player1_paid=expected,
+    )
+    create_transaction(tx_hash, match["player1"], amount, "match_entry", "confirmed")
+    mark_processed_tx(tx_hash)
+    await safe_send(application.bot, match["player1"], f"✅ Match payment confirmed for challenge #{match_id}. Your challenge is now live.")
+    await post_waiting_challenge(application.bot, match_id)
+    logger.info("Match payment confirmed: match=%s amount=%s tx=%s", match_id, amount, tx_hash)
+
+
+# 3. Verification system handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Welcome to PvP Bot 🎮")
+    sync_user_from_update(update)
+    user = get_user(update.effective_user.id)
+    if user and int(user["is_verified"] or 0) == -1:
+        await safe_reply(update, "⛔ You have been banned. Contact admin.")
+        return
+    await safe_reply(update, "Welcome to PvP Bot 🎮")
 
 
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_private(update):
+        return
+    user = await get_current_user(update)
+    status = int(user["is_verified"] or 0)
+    if status == -1:
+        await safe_reply(update, "⛔ You have been banned. Contact admin.")
+        return
+    if status == 1:
+        await safe_reply(update, "✅ You are already verified.")
+        return
+    if int(user["verification_requested"] or 0) == 1:
+        await safe_reply(update, "⏳ Your verification request is already pending admin approval.")
+        return
+
+    update_user_verification(user["user_id"], 0, 1)
+    label = username_label(user["username"], user["user_id"])
+    await notify_admin(
+        context.bot,
+        "🔔 New verification request!\n"
+        f"User: {label} (ID: {user['user_id']})\n"
+        f"Use /approve {user['user_id']} or /reject {user['user_id']}",
+    )
+    await safe_reply(update, "✅ Verification request sent to admin.")
+
+
+async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /approve <user_id>")
+        return
+    user_id = int(context.args[0])
+    user = get_user(user_id)
+    if not user:
+        await safe_reply(update, "User not found.")
+        return
+    update_user_verification(user_id, 1, 0)
+    await safe_send(context.bot, user_id, "✅ You have been verified and can now use paid matches and wallet features.")
+    await safe_reply(update, f"Approved {username_label(user['username'], user_id)}")
+
+
+async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if not context.args or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /reject <user_id> [reason]")
+        return
+    user_id = int(context.args[0])
+    reason = " ".join(context.args[1:]).strip()
+    user = get_user(user_id)
+    if not user:
+        await safe_reply(update, "User not found.")
+        return
+    update_user_verification(user_id, 0, 0)
+    message = "❌ Your verification request was rejected."
+    if reason:
+        message += f"\nReason: {reason}"
+    await safe_send(context.bot, user_id, message)
+    await safe_reply(update, f"Rejected {username_label(user['username'], user_id)}")
+
+
+# 4. Wallet handlers (/deposit, /withdraw, /balance)
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_private(update):
+        return
+    user = await require_verified_user(update)
+    if user is None:
+        return
+    if not PLATFORM_TON_WALLET:
+        await safe_reply(update, "⚠️ Platform wallet is not configured. Contact admin.")
+        return
+    await safe_reply(
+        update,
+        f"Send TON to: {PLATFORM_TON_WALLET}\n"
+        f"Memo/Tag: {user['user_id']}\n"
+        f"Min deposit: {format_ton(MIN_DEPOSIT)} TON\n"
+        "Your balance will update within 2 minutes.",
+    )
+
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_private(update):
+        return
+    user = await require_verified_user(update)
+    if user is None:
+        return
+    if len(context.args) != 2:
+        await safe_reply(update, "Usage: /withdraw <amount> <ton_address>")
+        return
+    try:
+        amount = parse_ton_amount(context.args[0])
+    except ValueError as exc:
+        await safe_reply(update, str(exc))
+        return
+    if amount + 1e-9 < MIN_WITHDRAWAL:
+        await safe_reply(update, f"Minimum withdrawal is {format_ton(MIN_WITHDRAWAL)} TON.")
+        return
+    ton_address = context.args[1].strip()
+    try:
+        Address(ton_address)
+    except Exception:
+        await safe_reply(update, "Invalid TON address.")
+        return
+    available = float(user["wallet_balance"] or 0)
+    if available + 1e-9 < amount:
+        await safe_reply(update, "⚠️ Insufficient wallet balance.")
+        return
+
+    tx_ref = f"withdraw:pending:{uuid.uuid4().hex}"
+    create_transaction(tx_ref, user["user_id"], -amount, "withdraw", "pending")
+    try:
+        tx_hash = await send_ton_withdrawal(amount, ton_address, f"withdraw:{user['user_id']}")
+        adjust_user_balances(user["user_id"], wallet_delta=-amount)
+        set_user_ton_address(user["user_id"], ton_address)
+        create_transaction(tx_hash, user["user_id"], -amount, "withdraw", "confirmed")
+        await safe_reply(update, f"✅ Withdrawal of {format_ton(amount)} TON sent to {ton_address}")
+        await safe_send(context.bot, user["user_id"], f"✅ Withdrawal of {format_ton(amount)} TON sent to {ton_address}")
+        logger.info("Withdrawal sent: user=%s amount=%s address=%s", user["user_id"], amount, ton_address)
+    except Exception as exc:
+        logger.exception("Withdrawal failed: %s", exc)
+        create_transaction(tx_ref, user["user_id"], -amount, "withdraw", "failed")
+        await safe_reply(update, "⚠️ Withdrawal failed. Try again or contact admin.")
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_private(update):
+        return
+    user = await get_current_user(update)
+    total = float(user["wallet_balance"] or 0) + float(user["locked_balance"] or 0)
+    locked = float(user["locked_balance"] or 0)
+    available = float(user["wallet_balance"] or 0)
+    await safe_reply(
+        update,
+        "💰 Your Wallet\n"
+        f"TON Balance: {format_ton(total)} TON\n"
+        f"Locked (in match): {format_ton(locked)} TON\n"
+        f"Available: {format_ton(available)} TON",
+    )
+
+
+# 5. Match system handlers (/challenge, /accept, /result, /resolve)
 async def setmlbb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_private_chat(update):
-        await update.message.reply_text("This command can only be used in private chat.")
+    if not await require_private(update):
         return
-
+    user = await get_current_user(update)
+    if int(user["is_verified"] or 0) == -1:
+        await safe_reply(update, "⛔ You have been banned. Contact admin.")
+        return
     if len(context.args) != 1:
-        await update.message.reply_text("Usage: /setmlbb <mlbb_id>")
+        await safe_reply(update, "Usage: /setmlbb <mlbb_id>")
         return
-
     mlbb_id = context.args[0].strip()
     if not mlbb_id:
-        await update.message.reply_text("Usage: /setmlbb <mlbb_id>")
+        await safe_reply(update, "Usage: /setmlbb <mlbb_id>")
         return
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (user_id, mlbb_id)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET mlbb_id = EXCLUDED.mlbb_id
-                """,
-                (update.effective_user.id, mlbb_id),
-            )
-
-    await update.message.reply_text("MLBB ID saved ✅")
+    set_user_mlbb(user["user_id"], mlbb_id)
+    await safe_reply(update, "MLBB ID saved ✅")
 
 
 async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.message.reply_text("This command can only be used in group chat.")
+    if not await require_group(update):
         return
-
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /challenge <amount> <game>")
+    user = await require_verified_user(update)
+    if user is None:
+        return
+    if len(context.args) not in {2, 3}:
+        await safe_reply(update, "Usage: /challenge <amount> <game> [--pay]")
+        return
+    pay_mode = len(context.args) == 3 and context.args[2].lower() == "--pay"
+    if len(context.args) == 3 and not pay_mode:
+        await safe_reply(update, "Usage: /challenge <amount> <game> [--pay]")
         return
 
     try:
-        amount = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Invalid amount. Usage: /challenge <amount> <game>")
+        entry_fee = parse_ton_amount(context.args[0])
+    except ValueError as exc:
+        await safe_reply(update, str(exc))
+        return
+    if entry_fee + 1e-9 < MIN_ENTRY_FEE:
+        await safe_reply(update, f"Minimum entry fee is {format_ton(MIN_ENTRY_FEE)} TON.")
         return
 
     game = context.args[1].strip().lower()
-    if amount <= 0:
-        await update.message.reply_text("Invalid amount. Usage: /challenge <amount> <game>")
-        return
-
     if game not in {"dice", "chess", "mlbb"}:
-        await update.message.reply_text("Invalid game. Use one of: dice, chess, mlbb")
+        await safe_reply(update, "Game must be one of: dice, chess, mlbb")
+        return
+    if game == "mlbb" and not user["mlbb_id"]:
+        await safe_reply(update, "⚠️ Set your MLBB ID first with /setmlbb in private chat.")
+        return
+    if pay_mode and not PLATFORM_TON_WALLET:
+        await safe_reply(update, "⚠️ Platform wallet is not configured. Contact admin.")
         return
 
-    player_name = await group_user_display(update, update.effective_user.id)
+    status = "pending_payment" if pay_mode else "waiting"
+    with closing(get_conn()) as conn, conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO matches (
+                player1, game, amount, entry_fee, locked_amount, status,
+                created_at, group_chat_id, player1_pay_mode, player1_paid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user["user_id"],
+                game,
+                format_ton(entry_fee),
+                entry_fee,
+                0.0 if pay_mode else entry_fee,
+                status,
+                utc_now_str(),
+                update.effective_chat.id,
+                "external" if pay_mode else "wallet",
+                0.0 if pay_mode else entry_fee,
+            ),
+        )
+        match_id = int(cursor.lastrowid)
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO matches (player1, player2, game, amount, status, result1, result2, chat_id)
-                VALUES (%s, NULL, %s, %s, 'waiting', NULL, NULL, %s)
-                RETURNING match_id
-                """,
-                (update.effective_user.id, game, amount, update.effective_chat.id),
-            )
-            match_id = cur.fetchone()["match_id"]
+    if pay_mode:
+        await safe_reply(
+            update,
+            f"Send {format_ton(entry_fee)} TON to: {PLATFORM_TON_WALLET}\n"
+            f"Memo/Tag: {match_id}\n"
+            "This challenge will activate after payment is confirmed.\n"
+            f"Payment window: {MATCH_PAYMENT_WINDOW_MINUTES} minutes.",
+        )
+        return
 
-    await update.message.reply_text(
-        "🎮 PvP Challenge!\n\n"
-        f"{player_name} has challenged!\n\n"
-        f"💰 Bet: {amount}\n"
-        f"🎯 Game: {game}\n\n"
-        "Waiting for opponent...\n\n"
-        f"Use /accept {match_id}"
-    )
+    try:
+        lock_wallet_entry(user["user_id"], entry_fee, str(match_id))
+    except ValueError:
+        set_match_status(match_id, "cancelled", locked_amount=0, player1_paid=0)
+        await safe_reply(update, "⚠️ Insufficient wallet balance.")
+        return
+
+    set_match_status(match_id, "waiting", locked_amount=entry_fee, player1_paid=entry_fee)
+    message_id = await post_waiting_challenge(context.bot, match_id)
+    if message_id is None:
+        await safe_reply(update, f"Challenge #{match_id} created, but I could not post it automatically.")
 
 
 async def accept_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.message.reply_text("This command can only be used in group chat.")
+    if not await require_group(update):
+        return
+    user = await require_verified_user(update)
+    if user is None:
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /accept <match_id>")
         return
 
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /accept <match_id>")
+    match = get_match(int(context.args[0]))
+    if not match:
+        await safe_reply(update, "Invalid match ID.")
+        return
+    if match["status"] != "waiting":
+        await safe_reply(update, "This match is not available for acceptance.")
+        return
+    if match["player1"] == user["user_id"]:
+        await safe_reply(update, "You cannot accept your own challenge.")
+        return
+    if match["group_chat_id"] != update.effective_chat.id:
+        await safe_reply(update, "This match belongs to another group.")
+        return
+    if match["game"] == "mlbb" and not user["mlbb_id"]:
+        await safe_reply(update, "⚠️ Set your MLBB ID first with /setmlbb in private chat.")
+        return
+
+    entry_fee = float(match["entry_fee"] or 0)
+    if float(user["wallet_balance"] or 0) + 1e-9 < entry_fee:
+        await safe_reply(update, "⚠️ Insufficient wallet balance.")
         return
 
     try:
-        match_id = int(context.args[0])
+        lock_wallet_entry(user["user_id"], entry_fee, str(match["match_id"]))
     except ValueError:
-        await update.message.reply_text("Invalid match_id.")
+        await safe_reply(update, "⚠️ Insufficient wallet balance.")
         return
 
-    accepter_id = update.effective_user.id
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            """
+            UPDATE matches
+            SET player2 = ?, player2_pay_mode = 'wallet', player2_paid = ?,
+                locked_amount = ?, status = 'active', started_at = ?
+            WHERE match_id = ?
+            """,
+            (
+                user["user_id"],
+                entry_fee,
+                round(float(match["locked_amount"] or 0) + entry_fee, 8),
+                utc_now_str(),
+                match["match_id"],
+            ),
+        )
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE match_id = %s", (match_id,))
-            match = cur.fetchone()
-            if not match:
-                await update.message.reply_text("Invalid match_id.")
-                return
+    player1 = get_user(match["player1"])
+    player2 = get_user(user["user_id"])
+    if not player1 or not player2:
+        await safe_reply(update, "User data missing.")
+        return
+    active_match = get_match(match["match_id"])
+    gross = entry_fee * 2
+    net = gross * (1 - PLATFORM_FEE_RATE)
 
-            if match["status"] != "waiting":
-                await update.message.reply_text("This match is not available for acceptance.")
-                return
+    if active_match["game"] == "dice":
+        import random
 
-            if match["player1"] == accepter_id:
-                await update.message.reply_text("You cannot accept your own challenge.")
-                return
+        while True:
+            roll1 = random.randint(1, 6)
+            roll2 = random.randint(1, 6)
+            if roll1 != roll2:
+                break
+        winner_id = player1["user_id"] if roll1 > roll2 else player2["user_id"]
+        winner_label = username_label(player1["username"], player1["user_id"]) if winner_id == player1["user_id"] else username_label(player2["username"], player2["user_id"])
+        match_after, payout = finalize_match_payout(active_match["match_id"], winner_id)
+        await safe_reply(
+            update,
+            "🎲 Dice Match Started!\n\n"
+            f"{username_label(player1['username'], player1['user_id'])} rolled: 🎲 {roll1}\n"
+            f"{username_label(player2['username'], player2['user_id'])} rolled: 🎲 {roll2}\n\n"
+            f"🏆 Winner: {winner_label}\nPrize: {format_ton(payout)} TON credited to wallet",
+        )
+        await safe_send(context.bot, winner_id, f"✅ Payout sent! {format_ton(payout)} TON has been credited to your wallet for match #{match_after['match_id']}.")
+        return
 
-            cur.execute(
-                "UPDATE matches SET player2 = %s, status = 'active' WHERE match_id = %s",
-                (accepter_id, match_id),
-            )
+    if active_match["game"] == "chess":
+        await safe_reply(
+            update,
+            "♟️ Chess Match Confirmed!\n\n"
+            f"⚔️ Player 1: {username_label(player1['username'], player1['user_id'])}\n"
+            f"⚔️ Player 2: {username_label(player2['username'], player2['user_id'])}\n\n"
+            f"💰 Prize Pool: {format_ton(net)} TON\n"
+            f"🏆 Winner takes all (minus {int(PLATFORM_FEE_RATE * 100)}% platform fee)\n\n"
+            "Both players must submit:\n/result win  or  /result lose\n\n"
+            f"Match ID: #{active_match['match_id']}\n"
+            f"⏱️ Result deadline: {MATCH_RESULT_REMINDER_MINUTES} minutes",
+        )
+        return
 
-            player1_id = match["player1"]
-            player2_id = accepter_id
-            game = match["game"]
+    await safe_reply(
+        update,
+        "🎮 MLBB Match Confirmed!\n\n"
+        f"⚔️ Player 1: {username_label(player1['username'], player1['user_id'])}\n"
+        f"   MLBB ID: {player1['mlbb_id']}\n"
+        f"⚔️ Player 2: {username_label(player2['username'], player2['user_id'])}\n"
+        f"   MLBB ID: {player2['mlbb_id']}\n\n"
+        f"💰 Prize Pool: {format_ton(net)} TON\n"
+        f"🏆 Winner takes all (minus {int(PLATFORM_FEE_RATE * 100)}% platform fee)\n\n"
+        "👉 Add each other in-game and start the match!\n"
+        "👉 After match, BOTH players submit:\n"
+        "/result win  or  /result lose\n\n"
+        f"Match ID: #{active_match['match_id']}\n"
+        f"⏱️ Result deadline: {MATCH_RESULT_REMINDER_MINUTES} minutes",
+    )
 
-            player1_name = await group_user_display(update, player1_id)
-            player2_name = await group_user_display(update, player2_id)
 
-            if game == "dice":
-                rounds: list[tuple[int, int]] = []
-                while True:
-                    roll1 = random.randint(1, 6)
-                    roll2 = random.randint(1, 6)
-                    rounds.append((roll1, roll2))
-                    if roll1 != roll2:
-                        break
-
-                winner_name = player1_name if rounds[-1][0] > rounds[-1][1] else player2_name
-                winner_id = player1_id if rounds[-1][0] > rounds[-1][1] else player2_id
-                cur.execute(
-                    "UPDATE matches SET status = 'completed', winner = %s WHERE match_id = %s",
-                    (winner_id, match_id),
-                )
-
-                round_lines = []
-                for index, (p1_roll, p2_roll) in enumerate(rounds, start=1):
-                    label = "" if len(rounds) == 1 else f"Round {index}\n"
-                    round_lines.append(
-                        f"{label}{player1_name} rolled: 🎲 {p1_roll}\n{player2_name} rolled: 🎲 {p2_roll}"
-                    )
-
-                await update.message.reply_text(
-                    "🎲 Dice Match Started!\n\n"
-                    + "\n\n".join(round_lines)
-                    + f"\n\n🏆 Winner: {winner_name}"
-                )
-                return
-
-            if game == "chess":
-                if not WEBHOOK_URL:
-                    cur.execute("UPDATE matches SET status = 'cancelled' WHERE match_id = %s", (match_id,))
-                    await update.message.reply_text("Chess match cannot start because WEBHOOK_URL is not configured.")
-                    return
-
-                chess_token, chess_state = build_chess_state(match_id, player1_id, player2_id, player1_name, player2_name)
-                cur.execute(
-                    "UPDATE matches SET chess_token = %s, chess_state = %s WHERE match_id = %s",
-                    (json.dumps(chess_token)[1:-1], json.dumps(chess_state), match_id),
-                )
-                white_link = build_match_link(chess_token, "white", chess_state["white"]["auth"])
-                black_link = build_match_link(chess_token, "black", chess_state["black"]["auth"])
-
-                await update.message.reply_text(
-                    "♟️ Chess Match Started!\n\n"
-                    f"{player1_name} vs {player2_name}\n\n"
-                    "Open your page, choose time, and play:\n\n"
-                    f"White ({player1_name}): {white_link}\n\n"
-                    f"Black ({player2_name}): {black_link}"
-                )
-                return
-
-            cur.execute("SELECT mlbb_id FROM users WHERE user_id = %s", (player1_id,))
-            p1_row = cur.fetchone()
-            cur.execute("SELECT mlbb_id FROM users WHERE user_id = %s", (player2_id,))
-            p2_row = cur.fetchone()
-
-            p1_mlbb = p1_row["mlbb_id"] if p1_row else None
-            p2_mlbb = p2_row["mlbb_id"] if p2_row else None
-
-            if not p1_mlbb or not p2_mlbb:
-                cur.execute("UPDATE matches SET status = 'cancelled' WHERE match_id = %s", (match_id,))
-                await update.message.reply_text("Both users must set MLBB ID first.")
-                return
-
-            await update.message.reply_text(
-                "🎮 MLBB Match Started!\n\n"
-                f"{player1_name} ID: {p1_mlbb}\n"
-                f"{player2_name} ID: {p2_mlbb}\n\n"
-                "Add each other and start the match!"
-            )
+async def mark_dispute(application: Application, match: sqlite3.Row, group_message: str) -> None:
+    if match["status"] != "dispute":
+        set_match_status(match["match_id"], "dispute")
+        increment_dispute_stats(match)
+    refreshed = get_match(match["match_id"])
+    player1 = get_user(match["player1"])
+    player2 = get_user(match["player2"]) if match["player2"] else None
+    admin_message = (
+        f"⚠️ Dispute in Match #{match['match_id']}!\n"
+        f"Player1: {username_label(player1['username'], player1['user_id'])} → claimed {refreshed['result1'] or 'none'}\n"
+        f"Player2: {username_label(player2['username'], player2['user_id']) if player2 else 'N/A'} → claimed {refreshed['result2'] or 'none'}\n"
+        f"Use /resolve {match['match_id']} <winner_user_id>"
+    )
+    await notify_admin(application.bot, admin_message)
+    await safe_send(application.bot, match["group_chat_id"], group_message)
+    if player1:
+        await safe_send(application.bot, player1["user_id"], f"⚠️ Match #{match['match_id']} is in dispute. Admin has been notified.")
+    if player2:
+        await safe_send(application.bot, player2["user_id"], f"⚠️ Match #{match['match_id']} is in dispute. Admin has been notified.")
 
 
 async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.message.reply_text("This command can only be used in group chat.")
+    if not await require_group(update):
+        return
+    user = await get_current_user(update)
+    if int(user["is_verified"] or 0) == -1:
+        await safe_reply(update, "⛔ You have been banned. Contact admin.")
+        return
+    if len(context.args) != 1 or context.args[0].lower() not in {"win", "lose"}:
+        await safe_reply(update, "Usage: /result <win/lose>")
+        return
+    result = context.args[0].lower()
+
+    matches = get_active_manual_matches(user["user_id"])
+    if not matches:
+        await safe_reply(update, "No active manual match found for you.")
+        return
+    if len(matches) > 1 and CHESS_RESULT_SELECTION != "latest":
+        await safe_reply(update, "You have multiple active manual matches. Resolve older matches first.")
+        return
+    match = matches[0]
+    store_match_result(match["match_id"], user["user_id"], result)
+    updated = get_match(match["match_id"])
+    if not updated:
+        await safe_reply(update, "Match not found.")
         return
 
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /result <win/lose>")
+    if not updated["result1"] or not updated["result2"]:
+        await safe_reply(update, "Result submitted. Waiting for the other player.")
         return
 
-    user_result = context.args[0].lower()
-    if user_result not in {"win", "lose"}:
-        await update.message.reply_text("Usage: /result <win/lose>")
+    if updated["result1"] == updated["result2"]:
+        await mark_dispute(
+            context.application,
+            updated,
+            f"⚠️ Result disputed! Admin has been notified.\nPlease wait for admin decision.\nMatch ID: #{updated['match_id']}",
+        )
         return
 
-    user_id = update.effective_user.id
-
-    with get_db_connection() as conn:
-        match = get_manual_mlbb_match(conn, user_id)
-        if not match:
-            await update.message.reply_text("No active MLBB match found for you.")
-            return
-
-        match_id = match["match_id"]
-
-        with conn.cursor() as cur:
-            if match["player1"] == user_id:
-                cur.execute("UPDATE matches SET result1 = %s WHERE match_id = %s", (user_result, match_id))
-            elif match["player2"] == user_id:
-                cur.execute("UPDATE matches SET result2 = %s WHERE match_id = %s", (user_result, match_id))
-            else:
-                await update.message.reply_text("You are not part of this match.")
-                return
-
-            cur.execute("SELECT * FROM matches WHERE match_id = %s", (match_id,))
-            updated = cur.fetchone()
-            result1 = updated["result1"]
-            result2 = updated["result2"]
-
-            if not result1 or not result2:
-                await update.message.reply_text("Result submitted. Waiting for the other player.")
-                return
-
-            if result1 == result2:
-                cur.execute("UPDATE matches SET status = 'dispute' WHERE match_id = %s", (match_id,))
-                await update.message.reply_text("⚠️ Dispute detected. Admin will decide.")
-                return
-
-            if result1 == "win" and result2 == "lose":
-                winner_id = updated["player1"]
-            elif result1 == "lose" and result2 == "win":
-                winner_id = updated["player2"]
-            else:
-                cur.execute("UPDATE matches SET status = 'dispute' WHERE match_id = %s", (match_id,))
-                await update.message.reply_text("⚠️ Dispute detected. Admin will decide.")
-                return
-
-            cur.execute(
-                "UPDATE matches SET status = 'completed', winner = %s WHERE match_id = %s",
-                (winner_id, match_id),
-            )
-
-    winner_name = await group_user_display(update, winner_id)
-    await update.message.reply_text(f"🏆 Winner: {winner_name}")
+    winner_id = updated["player1"] if updated["result1"] == "win" else updated["player2"]
+    match_after, payout = finalize_match_payout(updated["match_id"], winner_id)
+    winner = get_user(winner_id)
+    await safe_send(
+        context.bot,
+        match_after["group_chat_id"],
+        "🏆 Match #{} Result!\n\nWinner: {} (verified by both players)\nPrize: {} TON credited to wallet\n\nGG WP! 🎉".format(
+            match_after["match_id"],
+            username_label(winner["username"], winner_id) if winner else f"User {winner_id}",
+            format_ton(payout),
+        ),
+    )
+    await safe_send(context.bot, winner_id, f"✅ Payout sent! {format_ton(payout)} TON has been credited to your wallet.")
 
 
 async def resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.message.reply_text("This command can only be used in group chat.")
+    if not await require_admin_private(update):
         return
-
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Unauthorized.")
+    if len(context.args) != 2 or not context.args[0].isdigit() or not context.args[1].isdigit():
+        await safe_reply(update, "Usage: /resolve <match_id> <winner_user_id>")
         return
+    match_id = int(context.args[0])
+    winner_id = int(context.args[1])
+    match = get_match(match_id)
+    if not match:
+        await safe_reply(update, "Match not found.")
+        return
+    if winner_id not in {match["player1"], match["player2"]}:
+        await safe_reply(update, "Winner must be one of the match players.")
+        return
+    match_after, payout = finalize_match_payout(match_id, winner_id)
+    winner = get_user(winner_id)
+    await safe_send(
+        context.bot,
+        match_after["group_chat_id"],
+        f"🏆 Match #{match_after['match_id']} Result!\n\nWinner: {username_label(winner['username'], winner_id) if winner else winner_id}\nPrize: {format_ton(payout)} TON credited to wallet\n\nAdmin resolved the result.",
+    )
+    await safe_send(context.bot, winner_id, f"✅ Payout sent! {format_ton(payout)} TON has been credited to your wallet.")
+    await safe_reply(update, f"Match #{match_id} resolved.")
 
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /resolve <match_id> <winner_user_id>")
+
+# 6. Profile handler (/profile)
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_private(update):
+        return
+    user = await get_current_user(update)
+    stats = get_user_match_stats(user["user_id"])
+    wins = int(user["wins"] or 0)
+    losses = int(user["losses"] or 0)
+    disputes = int(user["disputes"] or 0)
+    decided = wins + losses
+    win_rate = (wins / decided * 100) if decided else 0.0
+    total_balance = float(user["wallet_balance"] or 0) + float(user["locked_balance"] or 0)
+    await safe_reply(
+        update,
+        "👤 Your Profile\n\n"
+        f"Username: {username_label(user['username'], user['user_id'])}\n"
+        f"MLBB ID: {user['mlbb_id'] or 'Not set'}\n"
+        f"Status: {verification_status_text(user)}\n\n"
+        "💰 Wallet\n"
+        f"TON Balance: {format_ton(total_balance)} TON\n"
+        f"Locked: {format_ton(float(user['locked_balance'] or 0))} TON\n\n"
+        "🎮 Match Stats\n"
+        f"Total Matches: {int(stats['total_matches'])}\n"
+        f"Wins: {wins} | Losses: {losses} | Disputes: {disputes}\n"
+        f"Win Rate: {win_rate:.0f}%\n\n"
+        "🏆 Earnings\n"
+        f"Total Won: {format_ton(float(user['total_earned'] or 0))} TON\n"
+        f"Total Lost: {format_ton(float(stats['total_lost']))} TON",
+    )
+
+
+# 7. Admin dashboard handlers
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    with closing(get_conn()) as conn:
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        verified_users = conn.execute("SELECT COUNT(*) FROM users WHERE is_verified = 1").fetchone()[0]
+        total_matches = conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+        completed = conn.execute("SELECT COUNT(*) FROM matches WHERE status = 'completed'").fetchone()[0]
+        disputed = conn.execute("SELECT COUNT(*) FROM matches WHERE status = 'dispute'").fetchone()[0]
+        active = conn.execute("SELECT COUNT(*) FROM matches WHERE status = 'active'").fetchone()[0]
+        volume = float(
+            conn.execute("SELECT COALESCE(SUM(entry_fee * 2), 0) FROM matches WHERE payout_sent = 1 AND winner_id IS NOT NULL").fetchone()[0]
+            or 0
+        )
+        earnings = float(
+            conn.execute(
+                "SELECT COALESCE(SUM((entry_fee * 2) - ((entry_fee * 2) * ?)), 0) FROM matches WHERE payout_sent = 1 AND winner_id IS NOT NULL",
+                (1 - PLATFORM_FEE_RATE,),
+            ).fetchone()[0]
+            or 0
+        )
+    await safe_reply(
+        update,
+        "Admin Stats\n\n"
+        f"Total Users: {total_users} | Verified Users: {verified_users}\n"
+        f"Total Matches: {total_matches} | Completed: {completed} | Disputed: {disputed} | Active: {active}\n"
+        f"Platform Earnings: {format_ton(earnings)} TON\n"
+        f"Total TON Volume: {format_ton(volume)} TON",
+    )
+
+
+async def admin_matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT m.*, u1.username AS p1_username, u2.username AS p2_username
+            FROM matches m
+            LEFT JOIN users u1 ON u1.user_id = m.player1
+            LEFT JOIN users u2 ON u2.user_id = m.player2
+            ORDER BY m.match_id DESC
+            LIMIT 10
+            """
+        ).fetchall()
+    if not rows:
+        await safe_reply(update, "No matches found.")
+        return
+    lines = ["Last 10 Matches"]
+    for row in rows:
+        lines.append(
+            f"#{row['match_id']} | {username_label(row['p1_username'], row['player1'])} vs {username_label(row['p2_username'], row['player2']) if row['player2'] else '—'} | {row['game']} | {format_ton(float(row['entry_fee'] or 0))} TON | {row['status']}"
+        )
+    await safe_reply(update, "\n".join(lines))
+
+
+async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /admin_user <user_id>")
+        return
+    user = get_user(int(context.args[0]))
+    if not user:
+        await safe_reply(update, "User not found.")
+        return
+    stats = get_user_match_stats(user["user_id"])
+    recent = get_recent_matches_for_user(user["user_id"], 5)
+    lines = [
+        f"User: {username_label(user['username'], user['user_id'])}",
+        f"ID: {user['user_id']}",
+        f"MLBB ID: {user['mlbb_id'] or 'Not set'}",
+        f"Status: {verification_status_text(user)}",
+        f"Wallet: {format_ton(float(user['wallet_balance'] or 0))} TON",
+        f"Locked: {format_ton(float(user['locked_balance'] or 0))} TON",
+        f"Wins: {user['wins']} | Losses: {user['losses']} | Disputes: {user['disputes']}",
+        f"Total Earned: {format_ton(float(user['total_earned'] or 0))} TON",
+        f"Total Lost: {format_ton(float(stats['total_lost']))} TON",
+        "Recent Matches:",
+    ]
+    if recent:
+        for match in recent:
+            lines.append(
+                f"#{match['match_id']} {match['game']} {format_ton(float(match['entry_fee'] or 0))} TON {match['status']}"
+            )
+    else:
+        lines.append("No match history.")
+    await safe_reply(update, "\n".join(lines))
+
+
+async def admin_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    try:
+        balance = await fetch_platform_wallet_balance()
+        await safe_reply(update, f"Platform wallet balance: {format_ton(balance)} TON")
+    except Exception as exc:
+        logger.exception("Failed to fetch platform balance: %s", exc)
+        await safe_reply(update, "Failed to fetch platform wallet balance.")
+
+
+async def admin_refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /admin_refund <match_id>")
+        return
+    match_id = int(context.args[0])
+    try:
+        match = refund_match(match_id)
+    except ValueError as exc:
+        await safe_reply(update, str(exc))
+        return
+    await safe_reply(update, f"Refunded match #{match_id}.")
+    for user_id in [match["player1"], match["player2"]]:
+        if user_id:
+            await safe_send(context.bot, user_id, f"Refund processed for match #{match_id}. Entry fee returned to your wallet.")
+    if match["group_chat_id"]:
+        await safe_send(context.bot, match["group_chat_id"], f"Admin refunded match #{match_id}. Both players have been refunded.")
+
+
+async def admin_ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /admin_ban <user_id>")
+        return
+    user_id = int(context.args[0])
+    user = get_user(user_id)
+    if not user:
+        await safe_reply(update, "User not found.")
+        return
+    update_user_verification(user_id, -1, 0)
+    await safe_send(context.bot, user_id, "You have been banned. Contact admin.")
+    await safe_reply(update, f"Banned {username_label(user['username'], user_id)}")
+
+
+async def admin_unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin_private(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await safe_reply(update, "Usage: /admin_unban <user_id>")
+        return
+    user_id = int(context.args[0])
+    user = get_user(user_id)
+    if not user:
+        await safe_reply(update, "User not found.")
+        return
+    update_user_verification(user_id, 0, 0)
+    await safe_send(context.bot, user_id, "✅ Your account has been restored. You can request verification again with /verify.")
+    await safe_reply(update, f"Unbanned {username_label(user['username'], user_id)}")
+
+
+# 8. Background job functions
+async def deposit_and_payment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    application = context.application
+    with closing(get_conn()) as conn, conn:
+        expired = conn.execute(
+            "SELECT * FROM matches WHERE status = 'pending_payment' AND created_at <= ?",
+            ((utc_now() - timedelta(minutes=MATCH_PAYMENT_WINDOW_MINUTES)).strftime("%Y-%m-%d %H:%M:%S"),),
+        ).fetchall()
+        for match in expired:
+            conn.execute("UPDATE matches SET status = 'cancelled' WHERE match_id = ?", (match["match_id"],))
+            await safe_send(application.bot, match["player1"], f"⚠️ Payment window expired for challenge #{match['match_id']}. The challenge was cancelled.")
+            if match["group_chat_id"]:
+                await safe_send(application.bot, match["group_chat_id"], f"Challenge #{match['match_id']} expired because payment was not received in time.")
+
+    if not PLATFORM_TON_WALLET:
         return
 
     try:
-        match_id = int(context.args[0])
-        winner_user_id = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Invalid arguments. Usage: /resolve <match_id> <winner_user_id>")
+        transactions = await fetch_platform_transactions()
+    except Exception as exc:
+        logger.exception("Failed to poll TonCenter transactions: %s", exc)
         return
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE match_id = %s", (match_id,))
-            match = cur.fetchone()
-            if not match:
-                await update.message.reply_text("Invalid match_id.")
-                return
-
-            if winner_user_id not in {match["player1"], match["player2"]}:
-                await update.message.reply_text("Winner must be one of the match players.")
-                return
-
-            chess_state = load_chess_state(match["chess_state"]) if match.get("chess_state") else None
-            if chess_state:
-                chess_state["status"] = "completed"
-                chess_state["winner"] = winner_user_id
-                chess_state["result_reason"] = "admin_resolved"
-                cur.execute(
-                    "UPDATE matches SET status = 'completed', winner = %s, chess_state = %s WHERE match_id = %s",
-                    (winner_user_id, json.dumps(chess_state), match_id),
-                )
-            else:
-                cur.execute(
-                    "UPDATE matches SET status = 'completed', winner = %s WHERE match_id = %s",
-                    (winner_user_id, match_id),
-                )
-
-    winner_name = await group_user_display(update, winner_user_id)
-    await update.message.reply_text(f"🏆 Winner: {winner_name}")
+    for tx in transactions:
+        tx_hash = extract_tx_hash(tx)
+        if not tx_hash or processed_tx_exists(tx_hash):
+            continue
+        if not transaction_is_incoming(tx):
+            mark_processed_tx(tx_hash)
+            continue
+        memo = extract_tx_comment(tx)
+        amount = extract_tx_amount(tx)
+        if not memo:
+            mark_processed_tx(tx_hash)
+            continue
+        if memo.isdigit() and get_match(int(memo)) and get_match(int(memo))["status"] == "pending_payment":
+            await process_match_payment_tx(application, tx_hash, int(memo), amount)
+            continue
+        if memo.isdigit() and get_user(int(memo)):
+            await process_deposit_tx(application, tx_hash, int(memo), amount)
+            continue
+        mark_processed_tx(tx_hash)
 
 
-def build_telegram_application() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
+async def match_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    application = context.application
+    reminded = application.bot_data.setdefault("reminded_matches", set())
+    dispute_cutoff = utc_now() - timedelta(minutes=MATCH_RESULT_DISPUTE_MINUTES)
+    reminder_cutoff = utc_now() - timedelta(minutes=MATCH_RESULT_REMINDER_MINUTES)
+    with closing(get_conn()) as conn:
+        active_matches = conn.execute(
+            "SELECT * FROM matches WHERE status = 'active' AND game IN ('mlbb', 'chess')"
+        ).fetchall()
+
+    for match in active_matches:
+        started_at = parse_db_time(match["started_at"] or match["created_at"])
+        if not started_at:
+            continue
+        if started_at <= dispute_cutoff and (not match["result1"] or not match["result2"]):
+            await mark_dispute(
+                application,
+                match,
+                f"⚠️ Result disputed! Admin has been notified.\nPlease wait for admin decision.\nMatch ID: #{match['match_id']}",
+            )
+            reminded.discard(match["match_id"])
+            continue
+        if started_at <= reminder_cutoff and match["match_id"] not in reminded and (not match["result1"] or not match["result2"]):
+            text = (
+                f"⏰ Reminder for match #{match['match_id']}: both players must submit results with /result win or /result lose."
+            )
+            await safe_send(application.bot, match["group_chat_id"], text)
+            if match["player1"]:
+                await safe_send(application.bot, match["player1"], text)
+            if match["player2"]:
+                await safe_send(application.bot, match["player2"], text)
+            reminded.add(match["match_id"])
+
+
+# 9. main() with ApplicationBuilder setup
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing.")
+
+    init_db()
+    logger.info("Database initialized at %s", DB_PATH)
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setmlbb", setmlbb_command))
+    application.add_handler(CommandHandler("verify", verify_command))
+    application.add_handler(CommandHandler("approve", approve_command))
+    application.add_handler(CommandHandler("reject", reject_command))
+    application.add_handler(CommandHandler("deposit", deposit_command))
+    application.add_handler(CommandHandler("withdraw", withdraw_command))
+    application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("challenge", challenge_command))
     application.add_handler(CommandHandler("accept", accept_command))
     application.add_handler(CommandHandler("result", result_command))
     application.add_handler(CommandHandler("resolve", resolve_command))
-    return application
+    application.add_handler(CommandHandler("profile", profile_command))
+    application.add_handler(CommandHandler("admin_stats", admin_stats_command))
+    application.add_handler(CommandHandler("admin_matches", admin_matches_command))
+    application.add_handler(CommandHandler("admin_user", admin_user_command))
+    application.add_handler(CommandHandler("admin_balance", admin_balance_command))
+    application.add_handler(CommandHandler("admin_refund", admin_refund_command))
+    application.add_handler(CommandHandler("admin_ban", admin_ban_command))
+    application.add_handler(CommandHandler("admin_unban", admin_unban_command))
 
+    if application.job_queue is None:
+        raise RuntimeError("Job queue is unavailable. Install python-telegram-bot with job-queue extras.")
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    global telegram_app, polling_started
+    application.job_queue.run_repeating(deposit_and_payment_job, interval=60, first=15, name="deposit_and_payment_job")
+    application.job_queue.run_repeating(match_timeout_job, interval=300, first=60, name="match_timeout_job")
 
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing. Set BOT_TOKEN environment variable.")
-
-    print("Initializing database...")
-    init_db()
-    print("Database initialized.")
-
-    telegram_app = build_telegram_application()
-    await telegram_app.initialize()
-    await telegram_app.start()
-
-    if WEBHOOK_URL:
-        webhook_target = f"{WEBHOOK_URL.rstrip('/')}/{BOT_TOKEN}"
-        await telegram_app.bot.set_webhook(url=webhook_target)
-        print(f"Webhook set to {webhook_target}")
-    else:
-        if telegram_app.updater is None:
-            raise RuntimeError("Telegram updater is unavailable.")
-        await telegram_app.updater.start_polling(drop_pending_updates=True)
-        polling_started = True
-        print("Telegram polling started.")
-
-    try:
-        yield
-    finally:
-        if telegram_app:
-            if WEBHOOK_URL:
-                await telegram_app.bot.delete_webhook(drop_pending_updates=False)
-            if polling_started and telegram_app.updater is not None:
-                await telegram_app.updater.stop()
-            await telegram_app.stop()
-            await telegram_app.shutdown()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/", response_class=PlainTextResponse)
-async def home() -> str:
-    return "PvP Bot is running"
-
-
-@app.post(f"/{BOT_TOKEN}")
-async def telegram_webhook(request: Request) -> JSONResponse:
-    if not telegram_app:
-        raise HTTPException(status_code=503, detail="Telegram app is not ready.")
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return JSONResponse({"ok": True})
-
-
-@app.get("/chess/{token}", response_class=HTMLResponse)
-async def chess_page(token: str) -> HTMLResponse:
-    if not HTML_PATH.exists():
-        raise HTTPException(status_code=404, detail="Chess page not found.")
-    html = HTML_PATH.read_text(encoding="utf-8")
-    html = html.replace("__MATCH_TOKEN__", token)
-    return HTMLResponse(html)
-
-
-@app.post("/api/chess/{token}/join")
-async def chess_join(token: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    seat = str(payload.get("seat", ""))
-    auth = str(payload.get("auth", ""))
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE chess_token = %s", (token,))
-            match = cur.fetchone()
-            if not match:
-                raise HTTPException(status_code=404, detail="Match not found.")
-
-            state = load_chess_state(match["chess_state"])
-            seat_state = require_chess_auth(state, seat, auth)
-            seat_state["joined"] = True
-            if state["time_control"] and state["white"]["joined"] and state["black"]["joined"] and state["status"] == "lobby":
-                state["status"] = "active"
-                state["white"]["time_left"] = float(state["time_control"])
-                state["black"]["time_left"] = float(state["time_control"])
-                state["last_clock_update"] = time.time()
-                state["messages"] = [f"{state['white']['name']} vs {state['black']['name']} started."]
-
-            save_chess_state(cur, match["match_id"], state)
-
-    return JSONResponse({"ok": True, "player": seat_state["name"]})
-
-
-@app.post("/api/chess/{token}/time")
-async def chess_time(token: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    seat = str(payload.get("seat", ""))
-    auth = str(payload.get("auth", ""))
-    seconds = int(payload.get("seconds", 0))
-    if seconds not in {180, 300, 600}:
-        raise HTTPException(status_code=400, detail="Invalid time control.")
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE chess_token = %s", (token,))
-            match = cur.fetchone()
-            if not match:
-                raise HTTPException(status_code=404, detail="Match not found.")
-
-            state = load_chess_state(match["chess_state"])
-            require_chess_auth(state, seat, auth)
-            if state["status"] != "lobby":
-                raise HTTPException(status_code=400, detail="Time control already locked.")
-            if state["time_control"] is not None:
-                raise HTTPException(status_code=400, detail="Time control already selected.")
-
-            state["time_control"] = seconds
-            state["messages"] = [f"Time control set to {seconds // 60} min."]
-            if state["white"]["joined"] and state["black"]["joined"]:
-                state["status"] = "active"
-                state["white"]["time_left"] = float(seconds)
-                state["black"]["time_left"] = float(seconds)
-                state["last_clock_update"] = time.time()
-                state["messages"].append("Both players joined. Match started.")
-
-            save_chess_state(cur, match["match_id"], state)
-
-    return JSONResponse({"ok": True})
-
-
-@app.get("/api/chess/{token}/state")
-async def chess_state(token: str, seat: str, auth: str) -> JSONResponse:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE chess_token = %s", (token,))
-            match = cur.fetchone()
-            if not match:
-                raise HTTPException(status_code=404, detail="Match not found.")
-
-    state = load_chess_state(match["chess_state"])
-    require_chess_auth(state, seat, auth)
-    state, _ = await resolve_chess_timeout(match, state)
-    return JSONResponse(serialize_chess_view(match, state, seat))
-
-
-@app.post("/api/chess/{token}/move")
-async def chess_move(token: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    seat = str(payload.get("seat", ""))
-    auth = str(payload.get("auth", ""))
-    from_square = str(payload.get("from", ""))
-    to_square = str(payload.get("to", ""))
-    promotion = str(payload.get("promotion", "q"))[:1].lower()
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE chess_token = %s", (token,))
-            match = cur.fetchone()
-            if not match:
-                raise HTTPException(status_code=404, detail="Match not found.")
-
-    state = load_chess_state(match["chess_state"])
-    require_chess_auth(state, seat, auth)
-
-    if state["status"] != "active":
-        raise HTTPException(status_code=400, detail="Match is not active.")
-    if state["turn"] != seat:
-        raise HTTPException(status_code=400, detail="Not your turn.")
-
-    state, timed_out = await resolve_chess_timeout(match, state)
-    if timed_out:
-        return JSONResponse(serialize_chess_view(match, state, seat))
-
-    board = board_from_state(state)
-    uci = f"{from_square}{to_square}"
-    if promotion in {"q", "r", "b", "n"} and (len(from_square) == 2 and len(to_square) == 2):
-        maybe_promo = f"{uci}{promotion}"
-        try:
-            move = chess.Move.from_uci(maybe_promo)
-            if move in board.legal_moves:
-                uci = maybe_promo
-        except ValueError:
-            pass
-
-    try:
-        move = chess.Move.from_uci(uci)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid move.") from exc
-
-    if move not in board.legal_moves:
-        raise HTTPException(status_code=400, detail="Illegal move.")
-
-    board.push(move)
-    state["fen"] = board.fen()
-    state["turn"] = "black" if seat == "white" else "white"
-    state["last_clock_update"] = time.time()
-    state["messages"] = [f"{state[seat]['name']} played {board.peek().uci()}."]
-
-    winner_id: Optional[int] = None
-    announcement: Optional[str] = None
-    if board.is_checkmate():
-        state["status"] = "completed"
-        state["winner"] = state[seat]["id"]
-        state["result_reason"] = "checkmate"
-        winner_id = state[seat]["id"]
-        announcement = f"♟️ Chess Match Finished!\n\n🏆 Winner: {state[seat]['name']}\nReason: Checkmate"
-    elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_threefold_repetition():
-        state["status"] = "completed"
-        state["winner"] = None
-        state["result_reason"] = "draw"
-        announcement = "♟️ Chess Match Finished!\n\nResult: Draw"
-
-    completed_match: Optional[dict[str, Any]] = None
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            if state["status"] == "completed":
-                cur.execute(
-                    "UPDATE matches SET status = 'completed', winner = %s, chess_state = %s WHERE match_id = %s RETURNING *",
-                    (winner_id, json.dumps(state), match["match_id"]),
-                )
-                completed_match = cur.fetchone()
-            else:
-                save_chess_state(cur, match["match_id"], state)
-
-    if completed_match and announcement:
-        await announce_winner(completed_match, winner_id, announcement)
-
-    return JSONResponse(serialize_chess_view(match, state, seat))
-
-
-@app.post("/api/chess/{token}/resign")
-async def chess_resign(token: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    seat = str(payload.get("seat", ""))
-    auth = str(payload.get("auth", ""))
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM matches WHERE chess_token = %s", (token,))
-            match = cur.fetchone()
-            if not match:
-                raise HTTPException(status_code=404, detail="Match not found.")
-            state = load_chess_state(match["chess_state"])
-            require_chess_auth(state, seat, auth)
-            if state["status"] != "active":
-                raise HTTPException(status_code=400, detail="Match is not active.")
-
-            winner_seat = "black" if seat == "white" else "white"
-            state["status"] = "completed"
-            state["winner"] = state[winner_seat]["id"]
-            state["result_reason"] = "resignation"
-            cur.execute(
-                "UPDATE matches SET status = 'completed', winner = %s, chess_state = %s WHERE match_id = %s RETURNING *",
-                (state[winner_seat]["id"], json.dumps(state), match["match_id"]),
-            )
-            completed_match = cur.fetchone()
-
-    await announce_winner(
-        completed_match,
-        state[winner_seat]["id"],
-        f"♟️ Chess Match Finished!\n\n🏆 Winner: {state[winner_seat]['name']}\nReason: Resignation",
-    )
-    return JSONResponse({"ok": True})
-
-
-def main() -> None:
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    logger.info("Bot starting...")
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
