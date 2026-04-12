@@ -1,5 +1,5 @@
-﻿services:
-  - type: web
+services:
+  - type: worker
     name: telegram-pvp-bot
     env: python
     plan: free
@@ -8,9 +8,11 @@
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: ADMIN_USER_ID
+      - key: ADMIN_ID
         sync: false
-      - key: DATABASE_URL
+      - key: PLATFORM_TON_WALLET
         sync: false
-      - key: WEBHOOK_URL
+      - key: TONCENTER_API_KEY
+        sync: false
+      - key: TON_WALLET_MNEMONIC
         sync: false
