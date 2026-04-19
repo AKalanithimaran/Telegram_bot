@@ -220,35 +220,77 @@ async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @guard_handler
 async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = await ensure_current_user(update)
-    if len(context.args) < 2:
-        await update.effective_message.reply_text("Usage: /challenge <amount> <game> [mode] [dice_count]")
+    args = context.args
+    if not args or len(args) < 2:
+        await update.effective_message.reply_text(
+            "Usage:\n"
+            "/challenge <amount> dice [normal|crazy] [1|2|3]\n"
+            "/challenge <amount> football [normal|crazy] [1|2|3]\n"
+            "/challenge <amount> chess\n"
+            "/challenge <amount> mlbb"
+        )
         return
+
     try:
-        amount = round(float(context.args[0]), 8)
+        amount = round(float(args[0]), 8)
+        if amount <= 0:
+            raise ValueError
     except ValueError:
-        await update.effective_message.reply_text("Amount must be numeric.")
+        await update.effective_message.reply_text("Invalid amount.")
         return
-    game = context.args[1].strip().lower()
+
+    game = args[1].strip().lower()
     if game not in {"dice", "football", "chess", "mlbb"}:
-        await update.effective_message.reply_text("Game must be one of: dice, football, chess, mlbb")
+        await update.effective_message.reply_text(
+            "Invalid game. Choose: dice, football, chess, mlbb"
+        )
         return
-    mode = context.args[2].strip().lower() if len(context.args) >= 3 else "normal"
-    dice_count = int(context.args[3]) if len(context.args) >= 4 and context.args[3].isdigit() else 1
+
+    mode = "normal"
+    dice_count = 1
     if game in {"dice", "football"}:
-        if mode not in {"normal", "crazy"}:
-            await update.effective_message.reply_text("Mode must be normal or crazy.")
-            return
-        if dice_count not in {1, 2, 3}:
-            await update.effective_message.reply_text("Dice count must be 1, 2, or 3.")
-            return
-    else:
-        mode = "normal"
-        dice_count = 1
+        if len(args) >= 3:
+            parsed_mode = args[2].strip().lower()
+            if parsed_mode in {"normal", "crazy"}:
+                mode = parsed_mode
+            else:
+                await update.effective_message.reply_text(
+                    f"Invalid mode. Use: normal or crazy\n"
+                    f"Example: /challenge {format_amount(amount)} {game} normal 2"
+                )
+                return
+        if len(args) >= 4:
+            try:
+                dice_count = int(args[3])
+                if dice_count not in {1, 2, 3}:
+                    raise ValueError
+            except ValueError:
+                await update.effective_message.reply_text("Dice count must be 1, 2, or 3.")
+                return
+    # chess/mlbb ignore extra args silently
+
+    user = await ensure_current_user(update)
+    if float(user.get("balance", 0.0)) < amount:
+        await update.effective_message.reply_text(
+            "\n".join(
+                [
+                    "Insufficient balance.",
+                    f"Your balance: {format_amount(float(user.get('balance', 0.0)))} TON",
+                    f"Required: {format_amount(amount)} TON",
+                ]
+            )
+        )
+        return
     if game == "mlbb" and not user.get("mlbb_id"):
         await update.effective_message.reply_text("Set your MLBB ID first with /setmlbb <mlbb_id>.")
         return
-    match = await create_challenge(user, amount, game, mode, dice_count, update.effective_chat.id)
+
+    try:
+        match = await create_challenge(user, amount, game, mode, dice_count, update.effective_chat.id)
+    except ValueError:
+        await update.effective_message.reply_text("Could not reserve balance. Try again.")
+        return
+
     await update.effective_message.reply_text(
         challenge_summary(match, user),
         reply_markup=accept_challenge_keyboard(match["_id"]),
