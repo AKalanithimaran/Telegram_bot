@@ -6,7 +6,16 @@ from typing import Any, Awaitable, Callable
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.games import challenge_summary, claim_and_activate_match, create_challenge, roll_competitive_dice, settle_match
+from bot.games import (
+    challenge_summary,
+    claim_and_activate_match,
+    create_challenge,
+    settle_match,
+    start_dice_game,
+    start_football_game,
+    start_chess_game,
+    start_mlbb_game,
+)
 from bot.keyboards import accept_challenge_keyboard, deposit_keyboard, games_keyboard, main_menu_keyboard
 from bot.payments import create_withdrawal_request, notify_deposit_prompt, transfer_tip
 from config import logger, settings
@@ -221,6 +230,8 @@ async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 @guard_handler
 async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
+
+    # ── Usage hint ──────────────────────────────────────────────────────────────
     if not args or len(args) < 2:
         await update.effective_message.reply_text(
             "Usage:\n"
@@ -231,66 +242,84 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    # ── Parse amount ─────────────────────────────────────────────────────────────
     try:
         amount = round(float(args[0]), 8)
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.effective_message.reply_text("Invalid amount.")
+        await update.effective_message.reply_text("❌ Invalid amount. Must be a positive number.")
         return
 
+    # ── Parse game ───────────────────────────────────────────────────────────────
     game = args[1].strip().lower()
     if game not in {"dice", "football", "chess", "mlbb"}:
         await update.effective_message.reply_text(
-            "Invalid game. Choose: dice, football, chess, mlbb"
+            "❌ Invalid game.\n"
+            "Choose from: dice, football, chess, mlbb"
         )
         return
 
+    # ── Parse mode + dice_count (dice/football only) ─────────────────────────────
     mode = "normal"
     dice_count = 1
+
     if game in {"dice", "football"}:
         if len(args) >= 3:
             parsed_mode = args[2].strip().lower()
-            if parsed_mode in {"normal", "crazy"}:
-                mode = parsed_mode
-            else:
+            if parsed_mode not in {"normal", "crazy"}:
                 await update.effective_message.reply_text(
-                    f"Invalid mode. Use: normal or crazy\n"
+                    f"❌ Invalid mode '{parsed_mode}'.\n"
+                    f"Use: normal or crazy\n"
                     f"Example: /challenge {format_amount(amount)} {game} normal 2"
                 )
                 return
+            mode = parsed_mode
         if len(args) >= 4:
             try:
                 dice_count = int(args[3])
                 if dice_count not in {1, 2, 3}:
                     raise ValueError
             except ValueError:
-                await update.effective_message.reply_text("Dice count must be 1, 2, or 3.")
+                await update.effective_message.reply_text(
+                    "❌ Dice/shot count must be 1, 2, or 3."
+                )
                 return
-    # chess/mlbb ignore extra args silently
+    # chess and mlbb: mode=None, dice_count=None — extra args silently ignored
+    else:
+        mode = None
+        dice_count = None
 
+    # ── Auth + balance check ─────────────────────────────────────────────────────
     user = await ensure_current_user(update)
-    if float(user.get("balance", 0.0)) < amount:
+
+    if game == "mlbb" and not user.get("mlbb_id"):
         await update.effective_message.reply_text(
-            "\n".join(
-                [
-                    "Insufficient balance.",
-                    f"Your balance: {format_amount(float(user.get('balance', 0.0)))} TON",
-                    f"Required: {format_amount(amount)} TON",
-                ]
-            )
+            "❌ Set your MLBB ID first with /setmlbb <mlbb_id>"
         )
         return
-    if game == "mlbb" and not user.get("mlbb_id"):
-        await update.effective_message.reply_text("Set your MLBB ID first with /setmlbb <mlbb_id>.")
+
+    if float(user.get("balance", 0.0)) < amount:
+        await update.effective_message.reply_text(
+            f"❌ Insufficient balance.\n"
+            f"Your balance: {format_amount(float(user.get('balance', 0.0)))} TON\n"
+            f"Required: {format_amount(amount)} TON"
+        )
         return
 
+    # ── Create challenge (reserves balance atomically) ───────────────────────────
     try:
-        match = await create_challenge(user, amount, game, mode, dice_count, update.effective_chat.id)
+        match = await create_challenge(
+            user, amount, game, mode, dice_count,
+            update.effective_chat.id
+        )
     except ValueError:
-        await update.effective_message.reply_text("Could not reserve balance. Try again.")
+        await update.effective_message.reply_text(
+            "❌ Could not reserve balance. Try again."
+        )
         return
 
+    # ── Post challenge card ──────────────────────────────────────────────────────
     await update.effective_message.reply_text(
         challenge_summary(match, user),
         reply_markup=accept_challenge_keyboard(match["_id"]),
@@ -298,84 +327,54 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 @guard_handler
-async def accept_command(update: Update, context: ContextTypes.DEFAULT_TYPE, match_id: str | None = None) -> None:
+async def accept_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    match_id: str | None = None,
+) -> None:
     user = await ensure_current_user(update)
     target_match_id = match_id or (context.args[0] if context.args else "")
+
     if not target_match_id:
         await update.effective_message.reply_text("Usage: /accept <match_id>")
         return
+
     match = await get_match(target_match_id)
     if not match or match["status"] != "pending":
-        await update.effective_message.reply_text("Match already taken or unavailable.")
+        await update.effective_message.reply_text("❌ Match already taken, cancelled, or unavailable.")
         return
+
     if str(match["challenger_id"]) == str(user["_id"]):
-        await update.effective_message.reply_text("You cannot accept your own challenge.")
+        await update.effective_message.reply_text("❌ You cannot accept your own challenge.")
         return
+
     if match["game"] == "mlbb" and not user.get("mlbb_id"):
-        await update.effective_message.reply_text("Set your MLBB ID first with /setmlbb <mlbb_id>.")
+        await update.effective_message.reply_text(
+            "❌ Set your MLBB ID first with /setmlbb <mlbb_id>"
+        )
         return
+
+    # ── Atomic claim ─────────────────────────────────────────────────────────────
     active_match = await claim_and_activate_match(match, user)
-    challenger = await get_user(active_match["challenger_id"])
-    opponent = user
-    amount = float(active_match["amount"])
-    if active_match["game"] in {"dice", "football"}:
-        emoji = "🎲" if active_match["game"] == "dice" else "⚽"
-        challenger_total, opponent_total = await roll_competitive_dice(update, context, emoji, int(active_match.get("dice_count", 1)))
-        if active_match.get("mode") == "crazy":
-            winner_id = active_match["challenger_id"] if challenger_total < opponent_total else active_match["opponent_id"]
-        else:
-            winner_id = active_match["challenger_id"] if challenger_total > opponent_total else active_match["opponent_id"]
-        settled, payout, fee = await settle_match(active_match, str(winner_id))
-        winner = challenger if str(winner_id) == str(challenger["_id"]) else opponent
-        title = "Football" if active_match["game"] == "football" else "Dice"
-        await update.effective_message.reply_text(
-            "\n".join(
-                [
-                    f"{title} result for match `{settled['_id']}`",
-                    f"{display_name(challenger)}: {challenger_total}",
-                    f"{display_name(opponent)}: {opponent_total}",
-                    f"Winner: {display_name(winner)}",
-                    f"Payout: {format_amount(payout)} TON",
-                    f"House fee: {format_amount(fee)} TON",
-                    ANTI_CHEAT_WARNING,
-                ]
-            )
-        )
+    if not active_match:
+        await update.effective_message.reply_text("❌ Match already taken. Try another.")
         return
-    if active_match["game"] == "chess":
-        base_url = settings.app_base_url or settings.webhook_url
-        challenger_url = f"{base_url}/chess?match_id={active_match['_id']}&user_id={challenger['_id']}"
-        opponent_url = f"{base_url}/chess?match_id={active_match['_id']}&user_id={opponent['_id']}"
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("Open Challenger Board", url=challenger_url)],
-                [InlineKeyboardButton("Open Opponent Board", url=opponent_url)],
-            ]
-        )
-        await update.effective_message.reply_text(
-            "\n".join(
-                [
-                    f"♟️ Chess match `{active_match['_id']}` is live.",
-                    f"{display_name(challenger)} vs {display_name(opponent)}",
-                    f"Wager: {format_amount(amount)} TON each",
-                    ANTI_CHEAT_WARNING,
-                ]
-            ),
-            reply_markup=keyboard,
-        )
-        return
-    await update.effective_message.reply_text(
-        "\n".join(
-            [
-                f"🎮 MLBB match `{active_match['_id']}` is active.",
-                f"{display_name(challenger)} vs {display_name(opponent)}",
-                f"{display_name(challenger)} MLBB ID: {challenger.get('mlbb_id')}",
-                f"{display_name(opponent)} MLBB ID: {opponent.get('mlbb_id')}",
-                f"Report with /result {active_match['_id']} win or /result {active_match['_id']} lose",
-                ANTI_CHEAT_WARNING,
-            ]
-        )
-    )
+
+    # ── Route to correct PvP game start ──────────────────────────────────────────
+    game = active_match["game"]
+    chat_id = update.effective_chat.id
+
+    if game == "dice":
+        await start_dice_game(context, active_match, chat_id)
+
+    elif game == "football":
+        await start_football_game(context, active_match, chat_id)
+
+    elif game == "chess":
+        await start_chess_game(context, active_match, chat_id)
+
+    elif game == "mlbb":
+        await start_mlbb_game(context, active_match, chat_id)
 
 
 @guard_handler
@@ -393,36 +392,61 @@ async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not match:
         await update.effective_message.reply_text("No active MLBB match found.")
         return
-    values = {"challenger_result": result} if str(match["challenger_id"]) == str(user["_id"]) else {"opponent_result": result}
-    match = await update_match(match_id, values)
+
+    # Determine which field to update
+    is_challenger = str(match["challenger_id"]) == str(user["_id"])
+    field = "challenger_result" if is_challenger else "opponent_result"
+
+    # Check if already reported
+    if match.get(field):
+        await update.effective_message.reply_text("❌ You already reported a result for this match.")
+        return
+
+    match = await update_match(match_id, {field: result})
     if not match:
         await update.effective_message.reply_text("Failed to update result.")
         return
+
+    # Wait for both
     if not match.get("challenger_result") or not match.get("opponent_result"):
-        await update.effective_message.reply_text("Result recorded. Waiting for the other player.")
+        await update.effective_message.reply_text("✅ Result recorded. Waiting for the other player.")
         return
-    if match["challenger_result"] == match["opponent_result"]:
+
+    # Both reported — check agreement
+    c_result = match["challenger_result"]
+    o_result = match["opponent_result"]
+
+    # Conflict: both claim win or both claim lose
+    if c_result == o_result:
         await update_match(match_id, {"status": "disputed"})
         for admin_id in settings.admin_ids:
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"Disputed MLBB match `{match_id}`. Resolve with /resolve {match_id} <winner_user_id>",
+                    text=(
+                        f"⚠️ Disputed MLBB match `{match_id}`\n"
+                        f"Both players reported the same result.\n"
+                        f"Resolve with: /resolve {match_id} <winner_user_id>"
+                    ),
                 )
             except Exception:
                 pass
-        await update.effective_message.reply_text(f"⚠️ Match `{match_id}` is disputed.\n{ANTI_CHEAT_WARNING}")
+        await update.effective_message.reply_text(
+            f"⚠️ Match `{match_id}` is disputed. Admins have been notified.\n{ANTI_CHEAT_WARNING}"
+        )
         return
-    winner_id = match["challenger_id"] if match["challenger_result"] == "win" else match["opponent_id"]
+
+    # Clear winner
+    winner_id = match["challenger_id"] if c_result == "win" else match["opponent_id"]
     settled, payout, fee = await settle_match(match, str(winner_id))
     winner = await get_user(winner_id)
     await update.effective_message.reply_text(
         "\n".join(
             [
-                f"MLBB match `{settled['_id']}` resolved.",
-                f"Winner: {display_name(winner)}",
-                f"Payout: {format_amount(payout)} TON",
-                f"House fee: {format_amount(fee)} TON",
+                f"🎮 MLBB match `{settled['_id']}` resolved!",
+                f"🏆 Winner: {display_name(winner)}",
+                f"💰 Payout: {format_amount(payout)} TON",
+                f"🏦 House fee: {format_amount(fee)} TON",
                 ANTI_CHEAT_WARNING,
             ]
         )
@@ -456,8 +480,17 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     transactions = await list_transactions_for_user(user["_id"], limit=10)
     matches = await list_matches_for_user(user["_id"], limit=10)
-    tx_lines = [f"{tx['type']} {format_amount(float(tx['amount']))} TON [{tx['status']}]" for tx in transactions] or ["No transactions yet."]
-    match_lines = [f"{match['_id']} {match['game']} {format_amount(float(match['amount']))} TON [{match['status']}]" for match in matches] or ["No matches yet."]
+    tx_lines = (
+        [f"{tx['type']} {format_amount(float(tx['amount']))} TON [{tx['status']}]" for tx in transactions]
+        or ["No transactions yet."]
+    )
+    match_lines = (
+        [
+            f"{m['_id']} {m['game']} {format_amount(float(m['amount']))} TON [{m['status']}]"
+            for m in matches
+        ]
+        or ["No matches yet."]
+    )
     await update.effective_message.reply_text(
         "Last 10 transactions\n"
         + "\n".join(tx_lines)
@@ -488,7 +521,7 @@ async def setmlbb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         {"_id": str(user["_id"])},
         {"$set": {"mlbb_id": context.args[0].strip(), "mlbb_verified": False, "last_active": utcnow()}},
     )
-    await update.effective_message.reply_text("MLBB ID saved.")
+    await update.effective_message.reply_text("✅ MLBB ID saved.")
 
 
 @guard_handler
@@ -496,10 +529,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
     action = query.data
+
     if action == "menu:balance":
         await balance_command(update, context)
     elif action == "menu:games":
-        await query.message.reply_text("Available games", reply_markup=games_keyboard())
+        await query.message.reply_text(
+            "🎮 Choose a game and create a challenge:\n\n"
+            "/challenge <amount> dice [normal|crazy] [1|2|3]\n"
+            "/challenge <amount> football [normal|crazy] [1|2|3]\n"
+            "/challenge <amount> chess\n"
+            "/challenge <amount> mlbb",
+            reply_markup=games_keyboard(),
+        )
     elif action == "menu:deposit":
         await deposit_command(update, context)
     elif action == "menu:withdraw":
@@ -546,14 +587,25 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action.startswith("deposit:"):
         await notify_deposit_prompt(update, context, action.split(":", 1)[1])
     elif action.startswith("games:"):
-        await query.message.reply_text(f"Use /challenge <amount> {action.split(':', 1)[1]} [mode] [dice_count]")
+        # Per-game correct usage hint
+        selected = action.split(":", 1)[1]
+        if selected in ("dice", "football"):
+            hint = f"/challenge <amount> {selected} [normal|crazy] [1|2|3]"
+        elif selected == "chess":
+            hint = "/challenge <amount> chess"
+        elif selected == "mlbb":
+            hint = "/challenge <amount> mlbb"
+        else:
+            hint = f"/challenge <amount> {selected}"
+        await query.message.reply_text(f"🎮 {selected.title()} — Create a challenge:\n{hint}")
 
 
 @guard_handler
 async def accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    await accept_command(update, context, match_id=query.data.split(":", 1)[1])
+    match_id = query.data.split(":", 1)[1]
+    await accept_command(update, context, match_id=match_id)
 
 
 @guard_handler
@@ -576,4 +628,6 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception:
             pass
-    await update.effective_message.reply_text("Your message was forwarded to admins for manual deposit review.")
+    await update.effective_message.reply_text(
+        "Your message was forwarded to admins for manual deposit review."
+    )
