@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from pathlib import Path
 
+import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
@@ -19,10 +18,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-import uvicorn
 
 from bot import admin as admin_handlers
-from bot.games import cancel_match_and_refund, settle_match
+from bot.games import expire_old_games, settle_match
 from bot.handlers import (
     accept_callback,
     accept_command,
@@ -41,19 +39,11 @@ from bot.handlers import (
     withdraw_command,
 )
 from config import logger, settings
-from db.models import add_transaction, get_match, get_user
+from db.models import claim_ton_deposit, get_match, get_user
 from db.mongo import mongo
-from services.ton import (
-    extract_amount,
-    extract_comment,
-    extract_ton_lt,
-    extract_tx_hash,
-    is_incoming,
-    safe_fetch_recent_transactions,
-)
-from utils import ANTI_CHEAT_WARNING, display_name, format_amount, utcnow
+from services.ton import extract_amount, extract_comment, extract_ton_lt, extract_tx_hash, is_incoming, safe_fetch_recent_transactions
+from utils import ANTI_CHEAT_WARNING, display_name, format_amount
 
-# Explicit update names for PTB 20.8 webhook registration.
 ALLOWED_UPDATES = [
     "message",
     "edited_message",
@@ -78,7 +68,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        db = await mongo.connect()
         transactions = await safe_fetch_recent_transactions(limit=20)
         if not transactions:
             return
@@ -86,74 +75,38 @@ async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
             if not is_incoming(tx):
                 continue
             ton_lt = extract_ton_lt(tx)
-            if not ton_lt:
-                continue
-            already = await db.transactions.find_one({"ton_lt": ton_lt})
-            if already:
-                continue
             memo = extract_comment(tx)
-            if not memo or not memo.isdigit():
+            if not ton_lt or not memo or not memo.isdigit():
                 continue
             user = await get_user(memo)
             if not user:
                 continue
             amount = extract_amount(tx)
             tx_hash = extract_tx_hash(tx)
-            await db.users.update_one(
-                {"_id": str(memo)},
-                {"$inc": {"balance": amount}},
-            )
-            await db.house.update_one(
-                {"_id": "singleton"},
-                {"$inc": {"total_deposited": amount}},
-            )
-            await add_transaction(
-                memo,
-                "deposit",
-                amount,
-                "completed",
-                crypto="TON",
-                tx_hash=tx_hash,
-                ton_lt=ton_lt,
-            )
-            await context.bot.send_message(
-                chat_id=int(memo),
-                text=f"✅ TON deposit confirmed: +{format_amount(amount)} TON added to your balance.",
-            )
+            if not await claim_ton_deposit(user_id=memo, amount=amount, ton_lt=ton_lt, tx_hash=tx_hash):
+                continue
+            try:
+                await context.bot.send_message(
+                    chat_id=int(memo),
+                    text=f"✅ TON deposit confirmed: +{format_amount(amount)} TON added to your balance.",
+                )
+            except Exception:
+                pass
     except Exception as exc:
         logger.exception("poll_ton_deposits error: %s", exc)
 
 
-async def expire_unfinished_games(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def game_expiry(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        db = await mongo.connect()
-        chess_cutoff = utcnow() - timedelta(hours=2)
-        async for match in db.matches.find(
-            {"game": "chess", "status": "active", "created_at": {"$lte": chess_cutoff}}
-        ):
-            await cancel_match_and_refund(match)
-            for chat_id in {
-                match.get("chat_id"),
-                match.get("challenger_id"),
-                match.get("opponent_id"),
-            }:
-                if chat_id:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=int(chat_id),
-                            text=(
-                                f"♟️ Chess match `{match['_id']}` expired after 2 hours.\n"
-                                "Both players have been refunded."
-                            ),
-                        )
-                    except Exception:
-                        pass
+        context.application.admin_ids = settings.admin_ids
+        await expire_old_games(context.application)
     except Exception as exc:
-        logger.exception("expire_unfinished_games error: %s", exc)
+        logger.exception("game_expiry error: %s", exc)
 
 
 def build_telegram_application() -> Application:
     application = Application.builder().token(settings.telegram_bot_token).updater(None).build()
+    application.admin_ids = settings.admin_ids
     user_handlers = [
         ("start", start_command),
         ("deposit", deposit_command),
@@ -191,15 +144,16 @@ def build_telegram_application() -> Application:
         application.add_handler(CommandHandler(name, handler))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(menu:|deposit:|games:)"))
     application.add_handler(CallbackQueryHandler(accept_callback, pattern=r"^accept:"))
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_withdraw_callback, pattern=r"^admin_withdraw_(approve|reject):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text_handler))
     application.add_error_handler(error_handler)
     if application.job_queue is None:
         raise RuntimeError(
             "python-telegram-bot was installed without job-queue support. "
-            "Install with python-telegram-bot[job-queue]==20.8."
+            "Install with: python-telegram-bot[job-queue]==20.8"
         )
     application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=10, name="ton_poll")
-    application.job_queue.run_repeating(expire_unfinished_games, interval=60, first=30, name="game_expiry")
+    application.job_queue.run_repeating(game_expiry, interval=60, first=30, name="game_expiry")
     return application
 
 
@@ -241,16 +195,19 @@ async def chess_result(request: Request) -> JSONResponse:
     winner = await get_user(winner_user_id)
     text = "\n".join(
         [
-            f"Chess match `{settled['_id']}` completed.",
-            f"Winner: {display_name(winner)}",
-            f"Payout: {format_amount(payout)} TON",
-            f"House fee: {format_amount(fee)} TON",
+            f"♟️ Chess match `{settled['_id']}` completed!",
+            f"🏆 Winner: {display_name(winner)}",
+            f"💰 Payout: {format_amount(payout)} TON",
+            f"🏦 House fee: {format_amount(fee)} TON",
             ANTI_CHEAT_WARNING,
         ]
     )
     for chat_id in {settled.get("chat_id"), settled.get("challenger_id"), settled.get("opponent_id")}:
         if chat_id:
-            await telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
+            try:
+                await telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
+            except Exception:
+                pass
     return JSONResponse({"ok": True, "match_id": settled["_id"], "winner_user_id": winner_user_id})
 
 

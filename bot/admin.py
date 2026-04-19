@@ -1,29 +1,48 @@
 from __future__ import annotations
 
+from functools import wraps
+from typing import Awaitable, Callable
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.games import cancel_match_and_refund, settle_match
 from bot.payments import approve_withdrawal_record, reject_withdrawal_record
-from config import settings
+from config import logger, settings
 from db.models import (
     add_balance,
     add_transaction,
+    admin_force_deduct_balance,
     admin_stats,
+    cancel_pending_matches_for_user,
     get_match,
     get_pending_withdrawal,
+    get_settings_doc,
     get_user,
     list_active_matches,
-    list_transactions_for_user,
     list_matches_for_user,
+    list_transactions_for_user,
     set_settings_values,
     sync_vip_status_all,
     top_wagerers,
-    update_match,
     update_pending_withdrawal,
 )
-from db.mongo import get_db
 from utils import display_name, format_amount, utcnow, win_rate
+
+AdminHandler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+
+
+def guard_admin(func: AdminHandler) -> AdminHandler:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            await func(update, context)
+        except Exception as exc:
+            logger.exception("Admin handler %s failed: %s", func.__name__, exc)
+            if update.effective_message:
+                await update.effective_message.reply_text("⚠️ Admin action failed.")
+
+    return wrapper  # type: ignore[return-value]
 
 
 def is_admin(user_id: int) -> bool:
@@ -40,6 +59,7 @@ async def require_admin(update: Update) -> bool:
     return True
 
 
+@guard_admin
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -49,13 +69,18 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = context.args[0]
     amount = float(context.args[1])
     reason = " ".join(context.args[2:]).strip() or None
-    user = await add_balance(user_id, amount, reason=reason, admin_id=update.effective_user.id)
+    user = await add_balance(user_id, amount, reason=reason, tx_type="admin_credit", admin_id=update.effective_user.id)
     if not user:
         await update.effective_message.reply_text("User not found.")
         return
     await update.effective_message.reply_text(f"Added {format_amount(amount)} TON to {display_name(user)}.")
+    try:
+        await context.bot.send_message(chat_id=int(user_id), text=f"Admin credited {format_amount(amount)} TON to your balance.")
+    except Exception:
+        pass
 
 
+@guard_admin
 async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -64,15 +89,20 @@ async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     user_id = context.args[0]
     amount = float(context.args[1])
-    from db.models import reserve_balance
-
-    if not await reserve_balance(user_id, amount):
-        await update.effective_message.reply_text("User not found or insufficient balance.")
+    reason = " ".join(context.args[2:]).strip() or None
+    user = await admin_force_deduct_balance(user_id, amount)
+    if not user:
+        await update.effective_message.reply_text("User not found.")
         return
-    await add_transaction(user_id, "house", -amount, "completed", admin_id=update.effective_user.id, metadata={"reason": " ".join(context.args[2:]).strip() or None})
-    await update.effective_message.reply_text(f"Deducted {format_amount(amount)} TON from {user_id}.")
+    await add_transaction(user_id, "admin_deduct", -amount, "completed", admin_id=update.effective_user.id, metadata={"reason": reason})
+    await update.effective_message.reply_text(f"Deducted {format_amount(amount)} TON from {display_name(user)}.")
+    try:
+        await context.bot.send_message(chat_id=int(user_id), text=f"Admin deducted {format_amount(amount)} TON from your balance.")
+    except Exception:
+        pass
 
 
+@guard_admin
 async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -83,18 +113,19 @@ async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAU
     if not withdrawal or withdrawal["status"] != "pending":
         await update.effective_message.reply_text("Withdrawal not found or already resolved.")
         return
-    await update_pending_withdrawal(
-        context.args[0],
-        {"status": "approved", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)},
-    )
+    await update_pending_withdrawal(context.args[0], {"status": "approved", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)})
     await approve_withdrawal_record(withdrawal, update.effective_user.id)
     await update.effective_message.reply_text(f"Approved withdrawal `{context.args[0]}`.")
-    await context.bot.send_message(
-        chat_id=int(withdrawal["user_id"]),
-        text=f"Your withdrawal `{context.args[0]}` was approved. Net amount: {format_amount(float(withdrawal['net_amount']))} TON.",
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(withdrawal["user_id"]),
+            text=f"Your withdrawal `{context.args[0]}` was approved. Net amount: {format_amount(float(withdrawal['net_amount']))} TON.",
+        )
+    except Exception:
+        pass
 
 
+@guard_admin
 async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -106,18 +137,19 @@ async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAUL
     if not withdrawal or withdrawal["status"] != "pending":
         await update.effective_message.reply_text("Withdrawal not found or already resolved.")
         return
-    await update_pending_withdrawal(
-        context.args[0],
-        {"status": "rejected", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)},
-    )
+    await update_pending_withdrawal(context.args[0], {"status": "rejected", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)})
     await reject_withdrawal_record(withdrawal, update.effective_user.id, reason)
     await update.effective_message.reply_text(f"Rejected withdrawal `{context.args[0]}`.")
-    await context.bot.send_message(
-        chat_id=int(withdrawal["user_id"]),
-        text=f"Your withdrawal `{context.args[0]}` was rejected.{f' Reason: {reason}' if reason else ''}",
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(withdrawal["user_id"]),
+            text=f"Your withdrawal `{context.args[0]}` was rejected.{f' Reason: {reason}' if reason else ''}",
+        )
+    except Exception:
+        pass
 
 
+@guard_admin
 async def approve_deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -126,20 +158,21 @@ async def approve_deposit_command(update: Update, context: ContextTypes.DEFAULT_
         return
     user_id, amount_raw, crypto = context.args
     amount = float(amount_raw)
-    db = await get_db()
-    await db.users.update_one({"_id": user_id}, {"$inc": {"balance": amount}})
-    user = await get_user(user_id)
+    user = await add_balance(user_id, amount, reason=f"manual_{crypto.lower()}_deposit", tx_type="deposit", admin_id=update.effective_user.id)
     if not user:
         await update.effective_message.reply_text("User not found.")
         return
     from services.house import add_house_deposit
 
     await add_house_deposit(amount)
-    await add_transaction(user_id, "deposit", amount, "completed", crypto=crypto, admin_id=update.effective_user.id)
     await update.effective_message.reply_text(f"Credited {format_amount(amount)} {crypto} to {display_name(user)}.")
-    await context.bot.send_message(chat_id=int(user_id), text=f"Your {crypto} deposit of {format_amount(amount)} has been approved.")
+    try:
+        await context.bot.send_message(chat_id=int(user_id), text=f"Your {crypto} deposit of {format_amount(amount)} has been approved.")
+    except Exception:
+        pass
 
 
+@guard_admin
 async def resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -158,6 +191,7 @@ async def resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text(f"Resolved match `{settled['_id']}`. Winner payout: {format_amount(payout)} TON.")
 
 
+@guard_admin
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -179,19 +213,20 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+@guard_admin
 async def wager_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
     users = await top_wagerers(limit=10)
     lines = ["Top 10 wagerers"]
     for idx, user in enumerate(users, start=1):
-        rate = win_rate(int(user["total_wins"]), int(user["total_losses"]))
         lines.append(
-            f"{idx}. {display_name(user)} — wagered {format_amount(float(user['total_wagered']))} TON | games {user['games_played']} | win rate {rate}%"
+            f"{idx}. {display_name(user)} — wagered {format_amount(float(user['total_wagered']))} TON | games {user['games_played']} | win rate {win_rate(int(user['total_wins']), int(user['total_losses']))}%"
         )
     await update.effective_message.reply_text("\n".join(lines))
 
 
+@guard_admin
 async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -202,8 +237,8 @@ async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not user:
         await update.effective_message.reply_text("User not found.")
         return
-    transactions = await list_transactions_for_user(user["_id"], limit=10)
-    matches = await list_matches_for_user(user["_id"], limit=10)
+    transactions = await list_transactions_for_user(user["_id"], limit=5)
+    matches = await list_matches_for_user(user["_id"], limit=5)
     tx_lines = [f"{tx['type']} {format_amount(float(tx['amount']))} {tx['status']}" for tx in transactions] or ["No transactions."]
     match_lines = [f"{match['_id']} {match['game']} {match['status']}" for match in matches] or ["No matches."]
     await update.effective_message.reply_text(
@@ -224,59 +259,67 @@ async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+@guard_admin
 async def admin_matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
     matches = await list_active_matches(limit=20)
-    if not matches:
-        await update.effective_message.reply_text("No active or pending matches.")
-        return
     lines = [
         f"{match['_id']} {match['game']} {match['status']} {format_amount(float(match['amount']))} TON"
         for match in matches
-    ]
+    ] or ["No pending/active/disputed matches."]
     await update.effective_message.reply_text("\n".join(lines))
 
 
+@guard_admin
 async def admin_ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
     if len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /admin_ban <user_id>")
         return
+    user_id = context.args[0]
+    from db.mongo import get_db
+
     db = await get_db()
-    result = await db.users.update_one({"_id": context.args[0]}, {"$set": {"is_banned": True}})
-    if result.modified_count != 1:
-        await update.effective_message.reply_text("User not found.")
-        return
-    await update.effective_message.reply_text(f"Banned {context.args[0]}.")
+    await db.users.update_one({"_id": user_id}, {"$set": {"is_banned": True}})
+    pending = await cancel_pending_matches_for_user(user_id)
+    for match in pending:
+        await cancel_match_and_refund(match)
+    await update.effective_message.reply_text(f"Banned {user_id}. Refunded {len(pending)} pending matches.")
 
 
+@guard_admin
 async def admin_unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
     if len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /admin_unban <user_id>")
         return
+    user_id = context.args[0]
+    from db.mongo import get_db
+
     db = await get_db()
-    result = await db.users.update_one({"_id": context.args[0]}, {"$set": {"is_banned": False}})
-    if result.modified_count != 1:
-        await update.effective_message.reply_text("User not found.")
-        return
-    await update.effective_message.reply_text(f"Unbanned {context.args[0]}.")
+    await db.users.update_one({"_id": user_id}, {"$set": {"is_banned": False}})
+    await update.effective_message.reply_text(f"Unbanned {user_id}.")
+    try:
+        await context.bot.send_message(chat_id=int(user_id), text="✅ Your account has been restored.")
+    except Exception:
+        pass
 
 
+@guard_admin
 async def set_fee_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /set_fee <percentage>")
+        await update.effective_message.reply_text("Usage: /set_fee <percent>")
         return
-    percentage = float(context.args[0])
-    await set_settings_values({"withdrawal_fee_percent": percentage})
-    await update.effective_message.reply_text(f"Withdrawal fee set to {percentage}%.")
+    updated = await set_settings_values({"withdrawal_fee_percent": float(context.args[0])})
+    await update.effective_message.reply_text(f"Withdrawal fee set to {updated['withdrawal_fee_percent']}%.")
 
 
+@guard_admin
 async def set_min_wager_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -289,6 +332,7 @@ async def set_min_wager_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.effective_message.reply_text(f"VIP threshold updated to {format_amount(amount)} TON.")
 
 
+@guard_admin
 async def set_deposit_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -299,15 +343,14 @@ async def set_deposit_address_command(update: Update, context: ContextTypes.DEFA
     if crypto not in {"TON", "USDT_BEP20", "SOL"}:
         await update.effective_message.reply_text("Crypto must be TON, USDT_BEP20, or SOL.")
         return
-    db = await get_db()
-    await db.settings.update_one(
-        {"_id": "singleton"},
-        {"$set": {f"deposit_addresses.{crypto}": context.args[1], "updated_at": utcnow()}},
-        upsert=True,
-    )
+    settings_doc = await get_settings_doc()
+    deposit_addresses = dict(settings_doc.get("deposit_addresses", {}))
+    deposit_addresses[crypto] = context.args[1]
+    await set_settings_values({"deposit_addresses": deposit_addresses})
     await update.effective_message.reply_text(f"Updated {crypto} deposit address.")
 
 
+@guard_admin
 async def admin_refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -322,6 +365,7 @@ async def admin_refund_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.effective_message.reply_text(f"Refunded match `{context.args[0]}`.")
 
 
+@guard_admin
 async def admin_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
@@ -337,3 +381,17 @@ async def admin_balance_command(update: Update, context: ContextTypes.DEFAULT_TY
             ]
         )
     )
+
+
+@guard_admin
+async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    action, withdrawal_id = query.data.split(":", 1)
+    context.args = [withdrawal_id]
+    if action == "admin_withdraw_approve":
+        await approve_withdrawal_command(update, context)
+    elif action == "admin_withdraw_reject":
+        await reject_withdrawal_command(update, context)

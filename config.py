@@ -32,6 +32,7 @@ class Settings:
     webhook_secret: str
     app_base_url: str
     request_timeout: float
+    webhook_path: str
 
 
 def load_settings() -> Settings:
@@ -50,6 +51,7 @@ def load_settings() -> Settings:
         webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
         app_base_url=webhook_url,
         request_timeout=float(os.getenv("HTTP_TIMEOUT", "20").strip() or 20),
+        webhook_path="/webhook",
     )
 
 

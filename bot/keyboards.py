@@ -47,3 +47,14 @@ def games_keyboard() -> InlineKeyboardMarkup:
 
 def accept_challenge_keyboard(match_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("Accept Challenge", callback_data=f"accept:{match_id}")]])
+
+
+def withdrawal_admin_keyboard(withdrawal_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Approve", callback_data=f"admin_withdraw_approve:{withdrawal_id}"),
+                InlineKeyboardButton("Reject", callback_data=f"admin_withdraw_reject:{withdrawal_id}"),
+            ]
+        ]
+    )

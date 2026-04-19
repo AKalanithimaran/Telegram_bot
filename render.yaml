@@ -2,7 +2,6 @@ services:
   - type: web
     name: telegram-gambling-bot
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     healthCheckPath: /health
@@ -10,6 +9,8 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: MONGO_URI
+        sync: false
+      - key: WEBHOOK_URL
         sync: false
       - key: ADMIN_IDS
         sync: false
@@ -19,15 +20,11 @@ services:
         sync: false
       - key: TONCENTER_API_URL
         value: https://toncenter.com/api/v2
-      - key: WEBHOOK_URL
-        sync: false
       - key: WITHDRAWAL_FEE_PERCENT
-        value: "5"
+        value: "5.0"
       - key: MIN_WAGER_THRESHOLD
-        value: "1000"
+        value: "1000.0"
       - key: PORT
         value: "8000"
       - key: WEBHOOK_SECRET
         sync: false
-      - key: LOG_LEVEL
-        value: INFO

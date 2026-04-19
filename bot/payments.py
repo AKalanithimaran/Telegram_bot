@@ -10,12 +10,21 @@ from db.models import (
     create_pending_withdrawal,
     get_settings_doc,
     get_user,
+    refund_balance,
+    reserve_balance,
 )
 from services.house import add_house_deposit, add_house_fee, add_house_withdrawal
 from utils import format_amount
 
 
-async def credit_confirmed_deposit(user_id: int | str, amount: float, *, crypto: str, tx_hash: str | None, ton_lt: str | None = None) -> None:
+async def credit_confirmed_deposit(
+    user_id: int | str,
+    amount: float,
+    *,
+    crypto: str,
+    tx_hash: str | None,
+    ton_lt: str | None = None,
+) -> None:
     await add_balance(user_id, amount, tx_type="deposit")
     await add_house_deposit(amount)
     await add_transaction(
@@ -69,7 +78,13 @@ async def approve_withdrawal_record(withdrawal: dict, admin_id: int) -> None:
 
 async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str | None) -> None:
     refund_amount = float(withdrawal.get("held_amount", withdrawal["amount"]))
-    await add_balance(withdrawal["user_id"], refund_amount, reason="withdrawal_rejected", tx_type="withdrawal", admin_id=admin_id)
+    await add_balance(
+        withdrawal["user_id"],
+        refund_amount,
+        reason="withdrawal_rejected",
+        tx_type="withdrawal",
+        admin_id=admin_id,
+    )
     await add_transaction(
         withdrawal["user_id"],
         "withdrawal",
@@ -85,6 +100,14 @@ async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str 
 async def tip_users(sender_id: int, recipient_id: int | str, amount: float) -> None:
     await add_transaction(sender_id, "tip_sent", -amount, "completed", metadata={"recipient_id": str(recipient_id)})
     await add_transaction(recipient_id, "tip_received", amount, "completed", metadata={"sender_id": str(sender_id)})
+
+
+async def transfer_tip(sender_id: int | str, recipient_id: int | str, amount: float) -> bool:
+    if not await reserve_balance(sender_id, amount):
+        return False
+    await refund_balance(recipient_id, amount)
+    await tip_users(sender_id, recipient_id, amount)
+    return True
 
 
 async def describe_balance(user_id: int | str) -> str:

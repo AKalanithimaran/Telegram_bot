@@ -24,7 +24,10 @@ async def ton_get(path: str, params: dict[str, Any] | None = None) -> Any:
 async def fetch_recent_transactions(limit: int = 20) -> list[dict[str, Any]]:
     if not settings.ton_deposit_address:
         return []
-    result = await ton_get("getTransactions", {"address": settings.ton_deposit_address, "limit": limit})
+    params: dict[str, Any] = {"address": settings.ton_deposit_address, "limit": limit}
+    if settings.ton_api_key:
+        params["api_key"] = settings.ton_api_key
+    result = await ton_get("getTransactions", params)
     return result if isinstance(result, list) else []
 
 
@@ -66,7 +69,7 @@ def extract_tx_hash(tx: dict[str, Any]) -> str | None:
 
 def is_incoming(tx: dict[str, Any]) -> bool:
     in_msg = tx.get("in_msg") or {}
-    return bool(in_msg)
+    return bool(in_msg and in_msg.get("value"))
 
 
 async def safe_fetch_recent_transactions(limit: int = 20) -> list[dict[str, Any]]:

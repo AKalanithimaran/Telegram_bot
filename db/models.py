@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from bson import ObjectId
 from nanoid import generate
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from config import settings
 from db.mongo import get_db
-from utils import utcnow
+from utils import (
+    get_cached_house,
+    get_cached_settings,
+    invalidate_house_cache,
+    invalidate_settings_cache,
+    utcnow,
+)
 
 
 MATCH_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -58,16 +66,14 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
 
 
 async def require_house() -> dict[str, Any]:
-    db = await get_db()
-    house = await db.house.find_one({"_id": "singleton"})
+    house = await get_cached_house()
     if not house:
         raise RuntimeError("House settings not initialized.")
     return house
 
 
 async def get_settings_doc() -> dict[str, Any]:
-    db = await get_db()
-    doc = await db.settings.find_one({"_id": "singleton"})
+    doc = await get_cached_settings()
     if not doc:
         raise RuntimeError("Settings document not initialized.")
     return doc
@@ -76,12 +82,14 @@ async def get_settings_doc() -> dict[str, Any]:
 async def set_settings_values(values: dict[str, Any]) -> dict[str, Any]:
     db = await get_db()
     values["updated_at"] = utcnow()
-    return await db.settings.find_one_and_update(
+    updated = await db.settings.find_one_and_update(
         {"_id": "singleton"},
         {"$set": values},
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
+    invalidate_settings_cache()
+    return updated
 
 
 async def sync_vip_status_for_user(user_id: int | str) -> None:
@@ -141,6 +149,43 @@ async def add_transaction(
     return await db.transactions.insert_one(doc)
 
 
+async def claim_ton_deposit(
+    *,
+    user_id: int | str,
+    amount: float,
+    ton_lt: str,
+    tx_hash: str | None,
+) -> bool:
+    db = await get_db()
+    try:
+        await db.transactions.insert_one(
+            {
+                "user_id": str(user_id),
+                "type": "deposit",
+                "amount": float(amount),
+                "status": "completed",
+                "crypto": "TON",
+                "tx_hash": tx_hash,
+                "ton_lt": ton_lt,
+                "address": None,
+                "admin_id": None,
+                "created_at": utcnow(),
+            }
+        )
+    except DuplicateKeyError:
+        return False
+    await db.users.update_one(
+        {"_id": str(user_id)},
+        {"$inc": {"balance": float(amount)}, "$set": {"last_active": utcnow()}},
+    )
+    await db.house.update_one(
+        {"_id": "singleton"},
+        {"$inc": {"total_deposited": float(amount)}},
+    )
+    invalidate_house_cache()
+    return True
+
+
 async def add_balance(
     user_id: int | str,
     amount: float,
@@ -169,11 +214,21 @@ async def add_balance(
 
 async def reserve_balance(user_id: int | str, amount: float) -> bool:
     db = await get_db()
-    result = await db.users.update_one(
+    result = await db.users.find_one_and_update(
         {"_id": str(user_id), "balance": {"$gte": float(amount)}},
         {"$inc": {"balance": -float(amount)}, "$set": {"last_active": utcnow()}},
+        return_document=ReturnDocument.AFTER,
     )
-    return result.modified_count == 1
+    return result is not None
+
+
+async def admin_force_deduct_balance(user_id: int | str, amount: float) -> dict[str, Any] | None:
+    db = await get_db()
+    return await db.users.find_one_and_update(
+        {"_id": str(user_id)},
+        {"$inc": {"balance": -float(amount)}, "$set": {"last_active": utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
 
 
 async def refund_balance(user_id: int | str, amount: float) -> None:
@@ -237,6 +292,20 @@ async def create_match(payload: dict[str, Any]) -> dict[str, Any]:
     return match
 
 
+async def claim_match_atomically(match_id: str, opponent_id: int | str) -> dict[str, Any] | None:
+    db = await get_db()
+    return await db.matches.find_one_and_update(
+        {"_id": match_id, "status": "pending", "opponent_id": None},
+        {
+            "$set": {
+                "status": "active",
+                "opponent_id": str(opponent_id),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 async def get_match(match_id: str) -> dict[str, Any] | None:
     db = await get_db()
     return await db.matches.find_one({"_id": match_id})
@@ -261,8 +330,6 @@ async def create_pending_withdrawal(doc: dict[str, Any]) -> str:
 
 async def get_pending_withdrawal(withdrawal_id: str) -> dict[str, Any] | None:
     db = await get_db()
-    from bson import ObjectId
-
     try:
         _id = ObjectId(withdrawal_id)
     except Exception:
@@ -272,8 +339,6 @@ async def get_pending_withdrawal(withdrawal_id: str) -> dict[str, Any] | None:
 
 async def update_pending_withdrawal(withdrawal_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
     db = await get_db()
-    from bson import ObjectId
-
     try:
         _id = ObjectId(withdrawal_id)
     except Exception:
@@ -357,3 +422,17 @@ async def admin_stats() -> dict[str, Any]:
         "disputed_matches": disputed_matches,
         "house": house,
     }
+
+
+async def cancel_pending_matches_for_user(user_id: int | str) -> list[dict[str, Any]]:
+    db = await get_db()
+    cursor = db.matches.find(
+        {
+            "status": "pending",
+            "$or": [
+                {"challenger_id": str(user_id)},
+                {"opponent_id": str(user_id)},
+            ],
+        }
+    )
+    return await cursor.to_list(length=200)
