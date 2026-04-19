@@ -46,6 +46,10 @@ from utils import (
 UserHandler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
+def sandbox_note() -> str:
+    return "Sandbox mode: TON economy is disabled."
+
+
 def guard_handler(func: UserHandler) -> UserHandler:
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -111,6 +115,9 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await ensure_current_user(update)
     if not await require_private(update, context):
         return
+    if settings.sandbox_mode:
+        await update.effective_message.reply_text("Deposit is disabled in sandbox mode.")
+        return
     if not settings.ton_enabled:
         await update.effective_message.reply_text(
             "TON deposit logic is temporarily disabled in development mode."
@@ -126,6 +133,9 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
     if not await require_private(update, context):
+        return
+    if settings.sandbox_mode:
+        await update.effective_message.reply_text("Withdrawal is disabled in sandbox mode.")
         return
     if not settings.ton_enabled:
         await update.effective_message.reply_text(
@@ -189,7 +199,10 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = await ensure_current_user(update)
     if not await require_private(update, context):
         return
-    await update.effective_message.reply_text(f"💰 Balance: {format_amount(float(user['balance']))} TON")
+    text = f"💰 Balance: {format_amount(float(user['balance']))} TON"
+    if settings.sandbox_mode:
+        text = f"{text}\n{sandbox_note()}"
+    await update.effective_message.reply_text(text)
 
 
 @guard_handler
@@ -213,6 +226,21 @@ async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if str(recipient["_id"]) == str(user["_id"]):
         await update.effective_message.reply_text("You cannot tip yourself.")
+        return
+    if settings.sandbox_mode:
+        await update.effective_message.reply_text(
+            f"Sent {format_amount(amount)} TON to {display_name(recipient)}.\n{sandbox_note()}"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=int(recipient["_id"]),
+                text=(
+                    f"You received a tip of {format_amount(amount)} TON from {display_name(user)}.\n"
+                    f"{sandbox_note()}"
+                ),
+            )
+        except Exception:
+            pass
         return
     if not await transfer_tip(user["_id"], recipient["_id"], amount):
         await update.effective_message.reply_text("Insufficient balance.")
@@ -299,7 +327,7 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    if float(user.get("balance", 0.0)) < amount:
+    if (not settings.sandbox_mode) and float(user.get("balance", 0.0)) < amount:
         await update.effective_message.reply_text(
             f"❌ Insufficient balance.\n"
             f"Your balance: {format_amount(float(user.get('balance', 0.0)))} TON\n"
@@ -456,21 +484,20 @@ async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @guard_handler
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
-    await update.effective_message.reply_text(
-        "\n".join(
-            [
-                f"👤 {display_name(user)}",
-                f"ID: {user['_id']}",
-                f"Balance: {format_amount(float(user['balance']))} TON",
-                f"Total wagered: {format_amount(float(user['total_wagered']))} TON",
-                f"Wins: {user['total_wins']} | Losses: {user['total_losses']}",
-                f"Profit/Loss: {format_amount(float(user['total_profit']))} TON",
-                f"Games played: {user['games_played']}",
-                f"VIP: {'Yes 👑' if user.get('is_vip') else 'No'}",
-                f"MLBB ID: {user.get('mlbb_id') or 'Not set'}",
-            ]
-        )
-    )
+    lines = [
+        f"👤 {display_name(user)}",
+        f"ID: {user['_id']}",
+        f"Balance: {format_amount(float(user['balance']))} TON",
+        f"Total wagered: {format_amount(float(user['total_wagered']))} TON",
+        f"Wins: {user['total_wins']} | Losses: {user['total_losses']}",
+        f"Profit/Loss: {format_amount(float(user['total_profit']))} TON",
+        f"Games played: {user['games_played']}",
+        f"VIP: {'Yes 👑' if user.get('is_vip') else 'No'}",
+        f"MLBB ID: {user.get('mlbb_id') or 'Not set'}",
+    ]
+    if settings.sandbox_mode:
+        lines.append(sandbox_note())
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 @guard_handler
@@ -491,12 +518,15 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ]
         or ["No matches yet."]
     )
-    await update.effective_message.reply_text(
+    text = (
         "Last 10 transactions\n"
         + "\n".join(tx_lines)
         + "\n\nLast 10 matches\n"
         + "\n".join(match_lines)
     )
+    if settings.sandbox_mode:
+        text = f"{text}\n\n{sandbox_note()}"
+    await update.effective_message.reply_text(text)
 
 
 @guard_handler

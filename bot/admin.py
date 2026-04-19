@@ -59,9 +59,18 @@ async def require_admin(update: Update) -> bool:
     return True
 
 
+async def require_finance_enabled(update: Update) -> bool:
+    if settings.sandbox_mode:
+        await update.effective_message.reply_text("This financial admin command is disabled in sandbox mode.")
+        return False
+    return True
+
+
 @guard_admin
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
+        return
+    if not await require_finance_enabled(update):
         return
     if len(context.args) < 2:
         await update.effective_message.reply_text("Usage: /add_balance <user_id> <amount> [reason]")
@@ -84,6 +93,8 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
+    if not await require_finance_enabled(update):
+        return
     if len(context.args) < 2:
         await update.effective_message.reply_text("Usage: /deduct_balance <user_id> <amount> [reason]")
         return
@@ -105,6 +116,8 @@ async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_T
 @guard_admin
 async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
+        return
+    if not await require_finance_enabled(update):
         return
     if len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /approve_withdrawal <withdrawal_id>")
@@ -129,6 +142,8 @@ async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAU
 async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
+    if not await require_finance_enabled(update):
+        return
     if not context.args:
         await update.effective_message.reply_text("Usage: /reject_withdrawal <withdrawal_id> [reason]")
         return
@@ -152,6 +167,8 @@ async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAUL
 @guard_admin
 async def approve_deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
+        return
+    if not await require_finance_enabled(update):
         return
     if len(context.args) != 3:
         await update.effective_message.reply_text("Usage: /approve_deposit <user_id> <amount> <crypto>")
@@ -312,6 +329,8 @@ async def admin_unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def set_fee_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
         return
+    if not await require_finance_enabled(update):
+        return
     if len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /set_fee <percent>")
         return
@@ -322,6 +341,8 @@ async def set_fee_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 @guard_admin
 async def set_min_wager_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
+        return
+    if not await require_finance_enabled(update):
         return
     if len(context.args) != 1:
         await update.effective_message.reply_text("Usage: /set_min_wager <amount>")
@@ -335,6 +356,8 @@ async def set_min_wager_command(update: Update, context: ContextTypes.DEFAULT_TY
 @guard_admin
 async def set_deposit_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update):
+        return
+    if not await require_finance_enabled(update):
         return
     if len(context.args) != 2:
         await update.effective_message.reply_text("Usage: /set_deposit_address <TON|USDT_BEP20|SOL> <address>")

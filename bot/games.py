@@ -37,6 +37,10 @@ from services.house import add_house_fee
 from utils import ANTI_CHEAT_WARNING, display_name, format_amount, utcnow
 
 
+def sandbox_note() -> str:
+    return "Sandbox mode: TON economy is disabled."
+
+
 def challenge_summary(match: dict[str, Any], challenger: dict[str, Any]) -> str:
     game = str(match.get("game", "")).lower()
     mode = str(match.get("mode", "normal")).lower()
@@ -49,16 +53,17 @@ def challenge_summary(match: dict[str, Any], challenger: dict[str, Any]) -> str:
         game_label = "Chess"
     else:
         game_label = "MLBB"
-    return "\n".join(
-        [
-            "PvP Challenge",
-            f"Match ID: `{match['_id']}`",
-            f"Game: {game_label}",
-            f"Bet: {format_amount(float(match['amount']))} TON",
-            f"Challenger: {display_name(challenger)}",
-            ANTI_CHEAT_WARNING,
-        ]
-    )
+    lines = [
+        "PvP Challenge",
+        f"Match ID: `{match['_id']}`",
+        f"Game: {game_label}",
+        f"Bet: {format_amount(float(match['amount']))} TON",
+        f"Challenger: {display_name(challenger)}",
+        ANTI_CHEAT_WARNING,
+    ]
+    if settings.sandbox_mode:
+        lines.append(sandbox_note())
+    return "\n".join(lines)
 
 
 async def create_challenge(
@@ -69,16 +74,17 @@ async def create_challenge(
     dice_count: int,
     chat_id: int,
 ) -> dict[str, Any]:
-    if not await reserve_balance(user["_id"], amount):
-        raise ValueError("Insufficient balance.")
-    await increment_wager_stats(user["_id"], amount)
-    await add_transaction(
-        user["_id"],
-        "game_loss",
-        -amount,
-        "pending",
-        metadata={"stage": "escrow"},
-    )
+    if not settings.sandbox_mode:
+        if not await reserve_balance(user["_id"], amount):
+            raise ValueError("Insufficient balance.")
+        await increment_wager_stats(user["_id"], amount)
+        await add_transaction(
+            user["_id"],
+            "game_loss",
+            -amount,
+            "pending",
+            metadata={"stage": "escrow"},
+        )
     return await create_match(
         {
             "game": game,
@@ -117,6 +123,7 @@ async def post_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, mat
         f"Challenger: {display_name(challenger)}\n\n"
         f"Tap Accept to join this match.\n"
         f"{ANTI_CHEAT_WARNING}"
+        + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
     )
     msg = await update.effective_message.reply_text(
         text,
@@ -135,18 +142,19 @@ async def claim_and_activate_match(match: dict[str, Any], user: dict[str, Any]) 
     if claimed is None:
         raise ValueError("Match already taken or unavailable.")
     amount = float(claimed["amount"])
-    if not await reserve_balance(user["_id"], amount):
-        await update_match(claimed["_id"], {"status": "pending", "opponent_id": None})
-        raise ValueError("Insufficient balance.")
-    await increment_wager_stats(claimed["challenger_id"], amount)
-    await increment_wager_stats(user["_id"], amount)
-    await add_transaction(
-        user["_id"],
-        "game_loss",
-        -amount,
-        "pending",
-        metadata={"stage": "escrow", "match_id": claimed["_id"]},
-    )
+    if not settings.sandbox_mode:
+        if not await reserve_balance(user["_id"], amount):
+            await update_match(claimed["_id"], {"status": "pending", "opponent_id": None})
+            raise ValueError("Insufficient balance.")
+        await increment_wager_stats(claimed["challenger_id"], amount)
+        await increment_wager_stats(user["_id"], amount)
+        await add_transaction(
+            user["_id"],
+            "game_loss",
+            -amount,
+            "pending",
+            metadata={"stage": "escrow", "match_id": claimed["_id"]},
+        )
     return claimed
 
 
@@ -175,23 +183,25 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("Match already taken.", show_alert=True)
         return
     amount = float(claimed["amount"])
-    if not await reserve_balance(opponent["_id"], amount):
-        await update_match(match_id, {"status": "pending", "opponent_id": None})
-        await query.answer("Insufficient balance.", show_alert=True)
-        return
-    await increment_wager_stats(claimed["challenger_id"], amount)
-    await increment_wager_stats(opponent["_id"], amount)
+    if not settings.sandbox_mode:
+        if not await reserve_balance(opponent["_id"], amount):
+            await update_match(match_id, {"status": "pending", "opponent_id": None})
+            await query.answer("Insufficient balance.", show_alert=True)
+            return
+        await increment_wager_stats(claimed["challenger_id"], amount)
+        await increment_wager_stats(opponent["_id"], amount)
     challenger = await get_user(claimed["challenger_id"])
+    lines = [
+        "Match started.",
+        f"Match ID: `{claimed['_id']}`",
+        f"Challenger: {display_name(challenger)}",
+        f"Opponent: {display_name(opponent)}",
+        f"Bet: {format_amount(amount)} TON each",
+    ]
+    if settings.sandbox_mode:
+        lines.append(sandbox_note())
     await query.message.edit_text(
-        "\n".join(
-            [
-                "Match started.",
-                f"Match ID: `{claimed['_id']}`",
-                f"Challenger: {display_name(challenger)}",
-                f"Opponent: {display_name(opponent)}",
-                f"Bet: {format_amount(amount)} TON each",
-            ]
-        ),
+        "\n".join(lines),
         reply_markup=None,
     )
     game = str(claimed["game"]).lower()
@@ -220,8 +230,12 @@ async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
     if cancelled is None:
         await query.answer("Only challenger can cancel pending match.", show_alert=True)
         return
-    await refund_balance(cancelled["challenger_id"], float(cancelled["amount"]))
-    await query.message.edit_text("Challenge cancelled. Bet refunded.", reply_markup=None)
+    if not settings.sandbox_mode:
+        await refund_balance(cancelled["challenger_id"], float(cancelled["amount"]))
+    text = "Challenge cancelled. Bet refunded."
+    if settings.sandbox_mode:
+        text = f"{text}\n{sandbox_note()}"
+    await query.message.edit_text(text, reply_markup=None)
 
 
 async def start_dice_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str, Any], chat_id: int | str) -> None:
@@ -239,6 +253,7 @@ async def start_dice_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str, A
         f"Both players must press Roll.\n\n"
         f"{display_name(challenger)} - Waiting\n"
         f"{display_name(opponent)} - Waiting"
+        + (f"\n\n{sandbox_note()}" if settings.sandbox_mode else "")
     )
     msg = await context.bot.send_message(
         chat_id=int(chat_id),
@@ -324,8 +339,9 @@ async def resolve_dice_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str,
     amount = float(match["amount"])
     payout = round(amount * 2 * 0.95, 8)
     fee = round(amount * 2 * 0.05, 8)
-    await record_game_result(winner_id, loser_id, amount, payout)
-    await add_house_fee(fee)
+    if not settings.sandbox_mode:
+        await record_game_result(winner_id, loser_id, amount, payout)
+        await add_house_fee(fee)
     await update_match(
         match["_id"],
         {"status": "completed", "winner_id": winner_id, "completed_at": utcnow()},
@@ -341,6 +357,7 @@ async def resolve_dice_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str,
             f"Winner: {display_name(winner)} (+{format_amount(payout)} TON)\n"
             f"House fee: {format_amount(fee)} TON\n\n"
             f"{ANTI_CHEAT_WARNING}"
+            + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
         ),
         reply_markup=None,
     )
@@ -361,6 +378,7 @@ async def start_football_game(context: ContextTypes.DEFAULT_TYPE, match: dict[st
         f"Both players must press Shot.\n\n"
         f"{display_name(challenger)} - Waiting\n"
         f"{display_name(opponent)} - Waiting"
+        + (f"\n\n{sandbox_note()}" if settings.sandbox_mode else "")
     )
     msg = await context.bot.send_message(
         chat_id=int(chat_id),
@@ -446,8 +464,9 @@ async def resolve_football_game(context: ContextTypes.DEFAULT_TYPE, match: dict[
     amount = float(match["amount"])
     payout = round(amount * 2 * 0.95, 8)
     fee = round(amount * 2 * 0.05, 8)
-    await record_game_result(winner_id, loser_id, amount, payout)
-    await add_house_fee(fee)
+    if not settings.sandbox_mode:
+        await record_game_result(winner_id, loser_id, amount, payout)
+        await add_house_fee(fee)
     await update_match(
         match["_id"],
         {"status": "completed", "winner_id": winner_id, "completed_at": utcnow()},
@@ -463,6 +482,7 @@ async def resolve_football_game(context: ContextTypes.DEFAULT_TYPE, match: dict[
             f"Winner: {display_name(winner)} (+{format_amount(payout)} TON)\n"
             f"House fee: {format_amount(fee)} TON\n\n"
             f"{ANTI_CHEAT_WARNING}"
+            + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
         ),
         reply_markup=None,
     )
@@ -477,6 +497,7 @@ async def start_chess_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str, 
         f"Bet: {format_amount(float(match['amount']))} TON\n\n"
         f"Open the board to play your moves.\n"
         f"Match expires in 2 hours if not completed."
+        + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
     )
     await context.bot.send_message(
         chat_id=int(match["challenger_id"]),
@@ -501,6 +522,7 @@ async def start_mlbb_game(context: ContextTypes.DEFAULT_TYPE, match: dict[str, A
         f"Bet: {format_amount(float(match['amount']))} TON\n\n"
         f"Play your Mobile Legends match and report result below.\n\n"
         f"{ANTI_CHEAT_WARNING}"
+        + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
     )
     msg = await context.bot.send_message(
         chat_id=int(chat_id),
@@ -578,6 +600,7 @@ async def handle_mlbb_result_callback(update: Update, context: ContextTypes.DEFA
             f"Winner: {display_name(winner)} (+{format_amount(payout)} TON)\n"
             f"House fee: {format_amount(fee)} TON\n\n"
             f"{ANTI_CHEAT_WARNING}"
+            + (f"\n{sandbox_note()}" if settings.sandbox_mode else "")
         ),
         reply_markup=None,
     )
@@ -588,8 +611,9 @@ async def settle_match(match: dict[str, Any], winner_id: str) -> tuple[dict[str,
     amount = float(match["amount"])
     payout = round(amount * 2 * 0.95, 8)
     fee = round(amount * 2 * 0.05, 8)
-    await record_game_result(winner_id, loser_id, amount, payout)
-    await add_house_fee(fee)
+    if not settings.sandbox_mode:
+        await record_game_result(winner_id, loser_id, amount, payout)
+        await add_house_fee(fee)
     updated = await update_match(
         match["_id"],
         {
@@ -609,9 +633,10 @@ async def cancel_match_and_refund(match: dict[str, Any]) -> None:
             "completed_at": utcnow(),
         },
     )
-    await refund_balance(match["challenger_id"], float(match["amount"]))
-    if match.get("opponent_id"):
-        await refund_balance(match["opponent_id"], float(match["amount"]))
+    if not settings.sandbox_mode:
+        await refund_balance(match["challenger_id"], float(match["amount"]))
+        if match.get("opponent_id"):
+            await refund_balance(match["opponent_id"], float(match["amount"]))
 
 
 async def roll_competitive_dice(

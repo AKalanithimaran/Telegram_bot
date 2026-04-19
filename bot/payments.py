@@ -25,6 +25,8 @@ async def credit_confirmed_deposit(
     tx_hash: str | None,
     ton_lt: str | None = None,
 ) -> None:
+    if settings.sandbox_mode:
+        return
     await add_balance(user_id, amount, tx_type="deposit")
     await add_house_deposit(amount)
     await add_transaction(
@@ -39,6 +41,8 @@ async def credit_confirmed_deposit(
 
 
 async def create_withdrawal_request(user_id: int, amount: float, address: str) -> tuple[str, float, float]:
+    if settings.sandbox_mode:
+        raise RuntimeError("Withdrawal is disabled in sandbox mode.")
     settings_doc = await get_settings_doc()
     fee_percent = float(settings_doc.get("withdrawal_fee_percent", settings.withdrawal_fee_percent))
     fee = round(amount * (fee_percent / 100), 8)
@@ -62,6 +66,8 @@ async def create_withdrawal_request(user_id: int, amount: float, address: str) -
 
 
 async def approve_withdrawal_record(withdrawal: dict, admin_id: int) -> None:
+    if settings.sandbox_mode:
+        return
     await add_house_fee(float(withdrawal["fee"]))
     await add_house_withdrawal(float(withdrawal["net_amount"]))
     await add_transaction(
@@ -77,6 +83,8 @@ async def approve_withdrawal_record(withdrawal: dict, admin_id: int) -> None:
 
 
 async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str | None) -> None:
+    if settings.sandbox_mode:
+        return
     refund_amount = float(withdrawal.get("held_amount", withdrawal["amount"]))
     await add_balance(
         withdrawal["user_id"],
@@ -98,11 +106,15 @@ async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str 
 
 
 async def tip_users(sender_id: int, recipient_id: int | str, amount: float) -> None:
+    if settings.sandbox_mode:
+        return
     await add_transaction(sender_id, "tip_sent", -amount, "completed", metadata={"recipient_id": str(recipient_id)})
     await add_transaction(recipient_id, "tip_received", amount, "completed", metadata={"sender_id": str(sender_id)})
 
 
 async def transfer_tip(sender_id: int | str, recipient_id: int | str, amount: float) -> bool:
+    if settings.sandbox_mode:
+        return True
     if not await reserve_balance(sender_id, amount):
         return False
     await refund_balance(recipient_id, amount)
