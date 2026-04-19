@@ -217,7 +217,6 @@ async def lifespan(_: Starlette):
     await telegram_app.bot.set_webhook(
         url=webhook_target,
         secret_token=settings.webhook_secret or None,
-        allowed_updates=list(UpdateType.ALL_TYPES),
         drop_pending_updates=True,
     )
     logger.info("Webhook set to %s", webhook_target)
