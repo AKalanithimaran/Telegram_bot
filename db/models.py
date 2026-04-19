@@ -21,8 +21,6 @@ async def ensure_user(user_id: int, username: str | None, first_name: str | None
         {
             "$setOnInsert": {
                 "_id": str(user_id),
-                "username": (username or "").lower() or None,
-                "first_name": first_name or "",
                 "balance": 0.0,
                 "total_wagered": 0.0,
                 "total_wins": 0,
@@ -34,7 +32,6 @@ async def ensure_user(user_id: int, username: str | None, first_name: str | None
                 "mlbb_id": None,
                 "mlbb_verified": False,
                 "joined_at": now,
-                "last_active": now,
             },
             "$set": {
                 "username": (username or "").lower() or None,
