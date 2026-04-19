@@ -10,7 +10,6 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from telegram import Update
-from telegram.constants import UpdateType
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -214,12 +213,15 @@ async def lifespan(_: Starlette):
     await telegram_app.initialize()
     await telegram_app.start()
     webhook_target = f"{settings.webhook_url}/webhook"
-    await telegram_app.bot.set_webhook(
-        url=webhook_target,
-        secret_token=settings.webhook_secret or None,
-        drop_pending_updates=True,
-    )
-    logger.info("Webhook set to %s", webhook_target)
+    try:
+        await telegram_app.bot.set_webhook(
+            url=webhook_target,
+            secret_token=settings.webhook_secret or None,
+            drop_pending_updates=True,
+        )
+        logger.info("Webhook set to %s", webhook_target)
+    except Exception as exc:
+        logger.exception("Webhook setup failed for %s: %s", webhook_target, exc)
     try:
         yield
     finally:
