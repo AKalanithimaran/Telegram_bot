@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 from telegram import Update
 from telegram.ext import (
@@ -40,10 +41,30 @@ from bot.handlers import (
     withdraw_command,
 )
 from config import logger, settings
-from db.models import add_transaction, get_match, get_user, update_match
+from db.models import add_transaction, get_match, get_user
 from db.mongo import mongo
-from services.ton import extract_amount, extract_comment, extract_ton_lt, extract_tx_hash, is_incoming, safe_fetch_recent_transactions
+from services.ton import (
+    extract_amount,
+    extract_comment,
+    extract_ton_lt,
+    extract_tx_hash,
+    is_incoming,
+    safe_fetch_recent_transactions,
+)
 from utils import ANTI_CHEAT_WARNING, display_name, format_amount, utcnow
+
+# Explicit update names for PTB 20.8 webhook registration.
+ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "callback_query",
+    "inline_query",
+    "chosen_inline_result",
+    "my_chat_member",
+    "chat_member",
+]
 
 telegram_app: Application | None = None
 
@@ -56,55 +77,79 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
-    db = await mongo.connect()
-    transactions = await safe_fetch_recent_transactions(limit=20)
-    if not transactions:
-        return
-    for tx in transactions:
-        if not is_incoming(tx):
-            continue
-        ton_lt = extract_ton_lt(tx)
-        if not ton_lt:
-            continue
-        already = await db.transactions.find_one({"ton_lt": ton_lt})
-        if already:
-            continue
-        memo = extract_comment(tx)
-        if not memo.isdigit():
-            continue
-        user = await get_user(memo)
-        if not user:
-            continue
-        amount = extract_amount(tx)
-        tx_hash = extract_tx_hash(tx)
-        await db.users.update_one({"_id": str(memo)}, {"$inc": {"balance": amount}})
-        await db.house.update_one({"_id": "singleton"}, {"$inc": {"total_deposited": amount}})
-        await add_transaction(
-            memo,
-            "deposit",
-            amount,
-            "completed",
-            crypto="TON",
-            tx_hash=tx_hash,
-            ton_lt=ton_lt,
-        )
-        await context.bot.send_message(
-            chat_id=int(memo),
-            text=f"TON deposit confirmed: +{format_amount(amount)} TON.",
-        )
+    try:
+        db = await mongo.connect()
+        transactions = await safe_fetch_recent_transactions(limit=20)
+        if not transactions:
+            return
+        for tx in transactions:
+            if not is_incoming(tx):
+                continue
+            ton_lt = extract_ton_lt(tx)
+            if not ton_lt:
+                continue
+            already = await db.transactions.find_one({"ton_lt": ton_lt})
+            if already:
+                continue
+            memo = extract_comment(tx)
+            if not memo or not memo.isdigit():
+                continue
+            user = await get_user(memo)
+            if not user:
+                continue
+            amount = extract_amount(tx)
+            tx_hash = extract_tx_hash(tx)
+            await db.users.update_one(
+                {"_id": str(memo)},
+                {"$inc": {"balance": amount}},
+            )
+            await db.house.update_one(
+                {"_id": "singleton"},
+                {"$inc": {"total_deposited": amount}},
+            )
+            await add_transaction(
+                memo,
+                "deposit",
+                amount,
+                "completed",
+                crypto="TON",
+                tx_hash=tx_hash,
+                ton_lt=ton_lt,
+            )
+            await context.bot.send_message(
+                chat_id=int(memo),
+                text=f"✅ TON deposit confirmed: +{format_amount(amount)} TON added to your balance.",
+            )
+    except Exception as exc:
+        logger.exception("poll_ton_deposits error: %s", exc)
 
 
 async def expire_unfinished_games(context: ContextTypes.DEFAULT_TYPE) -> None:
-    db = await mongo.connect()
-    chess_cutoff = utcnow() - timedelta(hours=2)
-    async for match in db.matches.find({"game": "chess", "status": "active", "created_at": {"$lte": chess_cutoff}}):
-        await cancel_match_and_refund(match)
-        for chat_id in {match.get("chat_id"), match.get("challenger_id"), match.get("opponent_id")}:
-            if chat_id:
-                await context.bot.send_message(
-                    chat_id=int(chat_id),
-                    text=f"Chess match `{match['_id']}` expired after 2 hours and both players were refunded.",
-                )
+    try:
+        db = await mongo.connect()
+        chess_cutoff = utcnow() - timedelta(hours=2)
+        async for match in db.matches.find(
+            {"game": "chess", "status": "active", "created_at": {"$lte": chess_cutoff}}
+        ):
+            await cancel_match_and_refund(match)
+            for chat_id in {
+                match.get("chat_id"),
+                match.get("challenger_id"),
+                match.get("opponent_id"),
+            }:
+                if chat_id:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=int(chat_id),
+                            text=(
+                                f"♟️ Chess match `{match['_id']}` expired after 2 hours.\n"
+                                "Both players have been refunded."
+                            ),
+                        )
+                    except Exception:
+                        pass
+    except Exception as exc:
+        logger.exception("expire_unfinished_games error: %s", exc)
 
 
 def build_telegram_application() -> Application:
@@ -165,6 +210,10 @@ async def health(_: Request) -> JSONResponse:
 async def webhook(request: Request) -> JSONResponse:
     if telegram_app is None:
         return JSONResponse({"ok": False, "error": "bot_not_ready"}, status_code=503)
+    if settings.webhook_secret:
+        token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if token != settings.webhook_secret:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
     payload = await request.json()
     update = Update.de_json(payload, telegram_app.bot)
     await telegram_app.process_update(update)
@@ -216,17 +265,22 @@ async def lifespan(_: Starlette):
     try:
         await telegram_app.bot.set_webhook(
             url=webhook_target,
+            allowed_updates=ALLOWED_UPDATES,
             secret_token=settings.webhook_secret or None,
             drop_pending_updates=True,
         )
-        logger.info("Webhook set to %s", webhook_target)
+        logger.info("Webhook set → %s", webhook_target)
     except Exception as exc:
-        logger.exception("Webhook setup failed for %s: %s", webhook_target, exc)
+        logger.error("Failed to set webhook: %s", exc)
     try:
         yield
     finally:
+        logger.info("Shutting down...")
         if telegram_app is not None:
-            await telegram_app.bot.delete_webhook(drop_pending_updates=False)
+            try:
+                await telegram_app.bot.delete_webhook(drop_pending_updates=False)
+            except Exception:
+                pass
             await telegram_app.stop()
             await telegram_app.shutdown()
         await mongo.close()
@@ -246,4 +300,5 @@ starlette_app = Starlette(
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:starlette_app", host="0.0.0.0", port=settings.port, log_level="info")
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:starlette_app", host="0.0.0.0", port=port, log_level="info")
