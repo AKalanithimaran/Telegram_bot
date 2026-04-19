@@ -282,6 +282,14 @@ async def record_game_result(
 
 async def create_match(payload: dict[str, Any]) -> dict[str, Any]:
     db = await get_db()
+    payload.setdefault("message_id", 0)
+    payload.setdefault("challenger_roll", None)
+    payload.setdefault("opponent_roll", None)
+    payload.setdefault("fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    payload.setdefault("turn", "white")
+    payload.setdefault("challenger_color", "white")
+    payload.setdefault("opponent_color", "black")
+    payload.setdefault("move_history", [])
     payload["_id"] = generate(MATCH_ID_ALPHABET, 8)
     payload["created_at"] = utcnow()
     payload["completed_at"] = None

@@ -3,171 +3,465 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chess Match</title>
+  <title>Chess Board</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --card: rgba(15, 23, 42, 0.88);
-      --accent: #f59e0b;
-      --accent-2: #38bdf8;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-      --danger: #fb7185;
+      --bg: #0e1512;
+      --panel: #17251d;
+      --line: #2a3a32;
+      --text: #e7efe9;
+      --muted: #9bb2a3;
+      --accent: #7de08f;
+      --light: #f1efd8;
+      --dark: #5b7a64;
+      --pick: #87ce89;
+      --danger: #e36f6f;
     }
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
     body {
       margin: 0;
-      min-height: 100vh;
-      font-family: "Space Grotesk", system-ui, sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.25), transparent 30%),
-        radial-gradient(circle at bottom right, rgba(245, 158, 11, 0.2), transparent 35%),
-        linear-gradient(135deg, #020617, #0f172a 55%, #111827);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(circle at top, #1b2e25, var(--bg) 50%);
       color: var(--text);
+      min-height: 100vh;
       display: grid;
       place-items: center;
-      padding: 24px;
+      padding: 12px;
     }
-    .card {
-      width: min(720px, 100%);
-      background: var(--card);
-      border: 1px solid rgba(148, 163, 184, 0.15);
-      border-radius: 24px;
-      padding: 28px;
-      box-shadow: 0 24px 80px rgba(2, 6, 23, 0.45);
-      backdrop-filter: blur(18px);
-    }
-    h1 { margin-top: 0; font-size: clamp(2rem, 4vw, 3rem); }
-    .lead { color: var(--muted); line-height: 1.6; }
-    .meta {
+    .wrap {
+      width: 100%;
+      max-width: 980px;
       display: grid;
-      gap: 12px;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      margin: 24px 0;
+      grid-template-columns: minmax(280px, 560px) minmax(240px, 360px);
+      gap: 16px;
     }
-    .meta div {
+    .board-panel,
+    .side-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
       padding: 14px;
-      border-radius: 16px;
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .title {
+      margin: 0 0 8px;
+      font-size: 20px;
+      letter-spacing: 0.3px;
+    }
+    .status {
+      margin: 0 0 12px;
+      color: var(--muted);
+      min-height: 20px;
     }
     .board {
-      aspect-ratio: 1;
-      border-radius: 18px;
-      overflow: hidden;
+      width: 100%;
+      aspect-ratio: 1 / 1;
       display: grid;
       grid-template-columns: repeat(8, 1fr);
-      margin: 24px 0;
-      border: 1px solid rgba(148, 163, 184, 0.15);
+      border: 1px solid #24342c;
+      overflow: hidden;
+      border-radius: 10px;
+      user-select: none;
+      touch-action: manipulation;
     }
-    .sq:nth-child(16n + 1),
-    .sq:nth-child(16n + 3),
-    .sq:nth-child(16n + 5),
-    .sq:nth-child(16n + 7),
-    .sq:nth-child(16n + 10),
-    .sq:nth-child(16n + 12),
-    .sq:nth-child(16n + 14),
-    .sq:nth-child(16n + 16) { background: #f8fafc; }
-    .sq:nth-child(16n + 2),
-    .sq:nth-child(16n + 4),
-    .sq:nth-child(16n + 6),
-    .sq:nth-child(16n + 8),
-    .sq:nth-child(16n + 9),
-    .sq:nth-child(16n + 11),
-    .sq:nth-child(16n + 13),
-    .sq:nth-child(16n + 15) { background: #0f766e; }
-    .sq { min-height: 48px; }
-    .actions {
+    .sq {
+      position: relative;
+      display: grid;
+      place-items: center;
+      font-size: clamp(28px, 4vw, 42px);
+      cursor: pointer;
+    }
+    .sq.light {
+      background: var(--light);
+      color: #1f2937;
+    }
+    .sq.dark {
+      background: var(--dark);
+      color: #f8fafc;
+    }
+    .sq.selected {
+      outline: 3px solid #ffe082;
+      outline-offset: -3px;
+    }
+    .sq.move::after {
+      content: "";
+      width: 30%;
+      height: 30%;
+      border-radius: 999px;
+      background: var(--pick);
+      opacity: 0.88;
+      position: absolute;
+    }
+    .coords {
+      margin-top: 8px;
       display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .meta p {
+      margin: 5px 0;
+      color: var(--muted);
+      font-size: 14px;
+      word-break: break-all;
+    }
+    .meta strong {
+      color: var(--text);
+    }
+    .actions {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
       flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 20px;
     }
     button {
-      border: 0;
-      border-radius: 999px;
-      padding: 14px 18px;
-      font: inherit;
+      border: 1px solid #355343;
+      background: #1f3329;
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 14px;
       cursor: pointer;
-      color: #020617;
-      background: linear-gradient(90deg, var(--accent), #fde68a);
-      transition: transform 160ms ease, opacity 160ms ease;
     }
-    button.alt {
-      background: linear-gradient(90deg, var(--accent-2), #bae6fd);
+    button:hover {
+      background: #284135;
     }
-    button.danger {
-      background: linear-gradient(90deg, var(--danger), #fecdd3);
+    .danger {
+      border-color: #6f2d2d;
+      background: #552525;
+      color: #ffd9d9;
     }
-    button:hover { transform: translateY(-1px); }
-    #status {
-      margin-top: 18px;
+    .danger:hover {
+      background: #6a2f2f;
+    }
+    .history {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #111a15;
+      max-height: 360px;
+      overflow: auto;
+      padding: 8px 10px;
+    }
+    .history-item {
+      font-size: 13px;
       color: var(--muted);
-      min-height: 24px;
+      padding: 4px 0;
+      border-bottom: 1px solid #23342b;
+    }
+    .history-item:last-child {
+      border-bottom: 0;
+    }
+    @media (max-width: 860px) {
+      .wrap {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
-  <main class="card">
-    <h1>Chess Match Room</h1>
-    <p class="lead">
-      Open this page from the bot link for your active chess wager. When the game ends, submit the winner below and the bot will validate the active match before paying out.
-    </p>
-    <section class="meta">
-      <div><strong>Match ID</strong><br /><span id="matchId">-</span></div>
-      <div><strong>User ID</strong><br /><span id="userId">-</span></div>
-      <div><strong>Webhook</strong><br /><span id="endpoint">-</span></div>
+  <div class="wrap">
+    <section class="board-panel">
+      <h1 class="title">Chess Match</h1>
+      <p class="status" id="turnStatus">Loading board...</p>
+      <div class="board" id="board"></div>
+      <div class="coords">
+        <span>a b c d e f g h</span>
+        <span>8 7 6 5 4 3 2 1</span>
+      </div>
     </section>
-    <section class="board" id="board"></section>
-    <div class="actions">
-      <button id="reportSelf">Report My Win</button>
-      <button class="alt" id="reportOpponent">Report Opponent Win</button>
-      <button class="danger" id="copyPayload">Copy Payload</button>
-    </div>
-    <p id="status">Waiting for action.</p>
-  </main>
+    <aside class="side-panel">
+      <div class="meta">
+        <p><strong>Match ID:</strong> <span id="matchId">-</span></p>
+        <p><strong>User ID:</strong> <span id="userId">-</span></p>
+        <p><strong>Your Color:</strong> <span id="myColor">-</span></p>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="resignBtn" type="button" class="danger">Resign</button>
+      </div>
+      <div class="history" id="history"></div>
+    </aside>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
   <script>
+    const PIECES = {
+      P: "♙", N: "♘", B: "♗", R: "♖", Q: "♕", K: "♔",
+      p: "♟", n: "♞", b: "♝", r: "♜", q: "♛", k: "♚",
+    };
+    const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
+
     const params = new URLSearchParams(window.location.search);
-    const matchId = params.get("match_id") || "";
-    const userId = params.get("user_id") || "";
-    const baseUrl = window.location.origin;
-    const endpoint = `${baseUrl}/chess_result`;
+    const matchId = (params.get("match_id") || "").trim();
+    const userId = (params.get("user_id") || "").trim();
+
+    const boardEl = document.getElementById("board");
+    const historyEl = document.getElementById("history");
+    const turnStatusEl = document.getElementById("turnStatus");
+    const myColorEl = document.getElementById("myColor");
     document.getElementById("matchId").textContent = matchId || "-";
     document.getElementById("userId").textContent = userId || "-";
-    document.getElementById("endpoint").textContent = endpoint;
 
-    const board = document.getElementById("board");
-    for (let i = 0; i < 64; i += 1) {
-      const sq = document.createElement("div");
-      sq.className = "sq";
-      board.appendChild(sq);
+    let chess = new Chess();
+    let state = null;
+    let myColor = null;
+    let selectedSquare = null;
+    let legalMoves = [];
+    let lastFen = "";
+    let pollTimer = null;
+    let finished = false;
+
+    function sqName(fileIndex, rankIndex) {
+      return `${FILES[fileIndex]}${RANKS[rankIndex]}`;
     }
 
-    async function submitWinner(winnerUserId) {
-      const status = document.getElementById("status");
-      status.textContent = "Submitting result...";
-      const response = await fetch(endpoint, {
+    function parseBoard(fen) {
+      const [placement] = fen.split(" ");
+      const rows = placement.split("/");
+      const result = [];
+      for (const row of rows) {
+        const expanded = [];
+        for (const ch of row) {
+          if (/\d/.test(ch)) {
+            const count = Number(ch);
+            for (let i = 0; i < count; i += 1) expanded.push(null);
+          } else {
+            expanded.push(ch);
+          }
+        }
+        result.push(expanded);
+      }
+      return result;
+    }
+
+    function renderBoard() {
+      boardEl.innerHTML = "";
+      const board = parseBoard(chess.fen());
+      for (let r = 0; r < 8; r += 1) {
+        for (let f = 0; f < 8; f += 1) {
+          const square = sqName(f, r);
+          const piece = board[r][f];
+          const cell = document.createElement("button");
+          cell.type = "button";
+          cell.className = `sq ${(r + f) % 2 === 0 ? "light" : "dark"}`;
+          if (selectedSquare === square) {
+            cell.classList.add("selected");
+          }
+          if (legalMoves.includes(square)) {
+            cell.classList.add("move");
+          }
+          cell.dataset.square = square;
+          cell.textContent = piece ? PIECES[piece] : "";
+          cell.addEventListener("click", onSquareClick);
+          boardEl.appendChild(cell);
+        }
+      }
+    }
+
+    function renderHistory(history) {
+      historyEl.innerHTML = "";
+      if (!history || history.length === 0) {
+        historyEl.textContent = "No moves yet.";
+        return;
+      }
+      history.forEach((mv, idx) => {
+        const row = document.createElement("div");
+        row.className = "history-item";
+        row.textContent = `${idx + 1}. ${mv}`;
+        historyEl.appendChild(row);
+      });
+    }
+
+    function setStatus(text) {
+      turnStatusEl.textContent = text;
+    }
+
+    function isMyTurn() {
+      if (!state || !myColor) return false;
+      return state.turn === myColor;
+    }
+
+    function updateTurnStatus() {
+      if (finished) return;
+      if (!state) {
+        setStatus("Loading...");
+        return;
+      }
+      if (state.status !== "active") {
+        setStatus(`Match status: ${state.status}`);
+        return;
+      }
+      if (isMyTurn()) {
+        setStatus("Your turn");
+      } else {
+        setStatus("Opponent's turn");
+      }
+    }
+
+    function clearSelection() {
+      selectedSquare = null;
+      legalMoves = [];
+    }
+
+    function highlightMoves(from) {
+      const moves = chess.moves({ square: from, verbose: true });
+      legalMoves = moves.map((m) => m.to);
+      selectedSquare = from;
+    }
+
+    async function postMove(from, to) {
+      let move = chess.move({ from, to, promotion: "q" });
+      if (!move) return false;
+      const uci = `${move.from}${move.to}${move.promotion || ""}`;
+      const response = await fetch("/chess_move", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ match_id: matchId, winner_user_id: winnerUserId })
+        body: JSON.stringify({
+          match_id: matchId,
+          user_id: userId,
+          move: uci,
+          fen: chess.fen(),
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        status.textContent = `Failed: ${payload.error || response.statusText}`;
-        return;
+        chess.undo();
+        if (payload.error === "not_your_turn") {
+          setStatus("Wait for opponent's move");
+        } else {
+          setStatus("Move rejected by server");
+        }
+        return false;
       }
-      status.textContent = `Winner submitted successfully for match ${payload.match_id}.`;
+      state.fen = payload.fen;
+      state.turn = payload.turn;
+      lastFen = payload.fen;
+      return true;
     }
 
-    document.getElementById("reportSelf").addEventListener("click", () => submitWinner(userId));
-    document.getElementById("reportOpponent").addEventListener("click", () => {
-      const opponentId = prompt("Enter the opponent Telegram user ID");
-      if (opponentId) submitWinner(opponentId.trim());
+    async function postResult(winnerUserId) {
+      if (finished) return;
+      finished = true;
+      await fetch("/chess_result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          match_id: matchId,
+          winner_user_id: winnerUserId,
+        }),
+      });
+    }
+
+    async function handleGameEnd() {
+      if (chess.in_checkmate()) {
+        const winner = chess.turn() === "w" ? "black" : "white";
+        const winnerId = winner === myColor
+          ? userId
+          : (myColor === "white" ? String(state.opponent_id) : String(state.challenger_id));
+        await postResult(winnerId);
+        setStatus(winnerId === userId ? "You Won!" : "You Lost");
+        return;
+      }
+      if (chess.in_stalemate() || chess.in_draw()) {
+        await postResult("draw");
+        setStatus("Draw. Bets refunded.");
+      }
+    }
+
+    async function onSquareClick(event) {
+      if (finished || !state || state.status !== "active") return;
+      const square = event.currentTarget.dataset.square;
+      if (!isMyTurn()) {
+        setStatus("Wait for opponent's move");
+        return;
+      }
+      const piece = chess.get(square);
+      if (!selectedSquare) {
+        if (!piece) return;
+        const mine = (myColor === "white" && piece.color === "w") || (myColor === "black" && piece.color === "b");
+        if (!mine) return;
+        highlightMoves(square);
+        renderBoard();
+        return;
+      }
+      if (square === selectedSquare) {
+        clearSelection();
+        renderBoard();
+        return;
+      }
+      const from = selectedSquare;
+      const validTarget = legalMoves.includes(square);
+      clearSelection();
+      if (!validTarget) {
+        if (piece) {
+          const mine = (myColor === "white" && piece.color === "w") || (myColor === "black" && piece.color === "b");
+          if (mine) highlightMoves(square);
+        }
+        renderBoard();
+        return;
+      }
+      const ok = await postMove(from, square);
+      renderBoard();
+      if (!ok) return;
+      renderHistory(chess.history({ verbose: false }).map(String));
+      updateTurnStatus();
+      await handleGameEnd();
+    }
+
+    async function loadState(force = false) {
+      if (!matchId) {
+        setStatus("Missing match_id.");
+        return;
+      }
+      const response = await fetch(`/chess_state?match_id=${encodeURIComponent(matchId)}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        setStatus("Could not load match.");
+        return;
+      }
+      state = payload;
+      if (!state.opponent_id) {
+        setStatus("Waiting for opponent to join.");
+      }
+      if (String(state.challenger_id) === userId) {
+        myColor = state.challenger_color || "white";
+      } else if (String(state.opponent_id) === userId) {
+        myColor = state.opponent_color || "black";
+      } else {
+        myColor = null;
+      }
+      myColorEl.textContent = myColor ? myColor : "spectator";
+      if (!state.fen) {
+        state.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+      }
+      if (force || state.fen !== lastFen) {
+        chess.load(state.fen);
+        lastFen = state.fen;
+        clearSelection();
+        renderBoard();
+      }
+      renderHistory((state.move_history || []).map(String));
+      updateTurnStatus();
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", () => loadState(true));
+    document.getElementById("resignBtn").addEventListener("click", async () => {
+      if (!state || !myColor || finished) return;
+      const ok = window.confirm("Resign this match?");
+      if (!ok) return;
+      const winnerId = myColor === "white"
+        ? String(state.opponent_id)
+        : String(state.challenger_id);
+      await postResult(winnerId);
+      setStatus("You resigned.");
     });
-    document.getElementById("copyPayload").addEventListener("click", async () => {
-      const payload = JSON.stringify({ match_id: matchId, winner_user_id: userId }, null, 2);
-      await navigator.clipboard.writeText(payload);
-      document.getElementById("status").textContent = "Payload copied to clipboard.";
+
+    loadState(true).then(() => {
+      pollTimer = setInterval(() => {
+        if (!finished) loadState(false);
+      }, 3000);
     });
   </script>
 </body>

@@ -85,6 +85,7 @@ def format_leaderboard(rows: list[dict[str, Any]]) -> str:
 @guard_handler
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
+    is_admin_user = update.effective_user.id in settings.admin_ids
     await update.effective_message.reply_text(
         "\n".join(
             [
@@ -92,7 +93,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Use the menu below to access balance, games, deposits, withdrawals, history, and leaderboard.",
             ]
         ),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(is_admin=is_admin_user),
     )
 
 
@@ -469,6 +470,37 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await leaderboard_command(update, context)
     elif action == "menu:tip":
         await query.message.reply_text("Use /tip <@username|user_id> <amount>")
+    elif action == "menu:admin":
+        if not is_private_chat(update):
+            await query.message.reply_text("Admin panel is available in private chat only.")
+            return
+        if update.effective_user.id not in settings.admin_ids:
+            await query.message.reply_text("Unauthorized.")
+            return
+        await query.message.reply_text(
+            "\n".join(
+                [
+                    "Admin commands:",
+                    "/add_balance <user_id> <amount> [reason]",
+                    "/deduct_balance <user_id> <amount> [reason]",
+                    "/approve_withdrawal <withdrawal_id>",
+                    "/reject_withdrawal <withdrawal_id> [reason]",
+                    "/approve_deposit <user_id> <amount> <crypto>",
+                    "/resolve <match_id> <winner_user_id>",
+                    "/admin_stats",
+                    "/wager_report",
+                    "/admin_user <user_id>",
+                    "/admin_matches",
+                    "/admin_ban <user_id>",
+                    "/admin_unban <user_id>",
+                    "/set_fee <percent>",
+                    "/set_min_wager <amount>",
+                    "/set_deposit_address <TON|USDT_BEP20|SOL> <address>",
+                    "/admin_refund <match_id>",
+                    "/admin_balance",
+                ]
+            )
+        )
     elif action.startswith("deposit:"):
         await notify_deposit_prompt(update, context, action.split(":", 1)[1])
     elif action.startswith("games:"):

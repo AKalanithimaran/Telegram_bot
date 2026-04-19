@@ -20,9 +20,9 @@ from telegram.ext import (
 )
 
 from bot import admin as admin_handlers
-from bot.games import expire_old_games, settle_match
+from bot import games
+from bot.games import cancel_match_and_refund, expire_old_games, settle_match
 from bot.handlers import (
-    accept_callback,
     accept_command,
     balance_command,
     challenge_command,
@@ -144,8 +144,12 @@ def build_telegram_application() -> Application:
     ]
     for name, handler in user_handlers + admin_command_map:
         application.add_handler(CommandHandler(name, handler))
+    application.add_handler(CallbackQueryHandler(games.handle_accept_callback, pattern=r"^accept:"))
+    application.add_handler(CallbackQueryHandler(games.handle_cancel_callback, pattern=r"^cancel:"))
+    application.add_handler(CallbackQueryHandler(games.handle_dice_roll_callback, pattern=r"^dice_roll:"))
+    application.add_handler(CallbackQueryHandler(games.handle_football_roll_callback, pattern=r"^football_roll:"))
+    application.add_handler(CallbackQueryHandler(games.handle_mlbb_result_callback, pattern=r"^mlbb_result:"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(menu:|deposit:|games:)"))
-    application.add_handler(CallbackQueryHandler(accept_callback, pattern=r"^accept:"))
     application.add_handler(CallbackQueryHandler(admin_handlers.admin_withdraw_callback, pattern=r"^admin_withdraw_(approve|reject):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text_handler))
     application.add_error_handler(error_handler)
@@ -194,6 +198,21 @@ async def chess_result(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "invalid_match"}, status_code=404)
     if match["status"] != "active":
         return JSONResponse({"ok": False, "error": "match_not_active"}, status_code=400)
+    if winner_user_id == "draw":
+        await cancel_match_and_refund(match)
+        draw_text = "\n".join(
+            [
+                f"Chess match `{match['_id']}` ended in a draw.",
+                "Bets refunded to both players.",
+            ]
+        )
+        for chat_id in {match.get("chat_id"), match.get("challenger_id"), match.get("opponent_id")}:
+            if chat_id:
+                try:
+                    await telegram_app.bot.send_message(chat_id=int(chat_id), text=draw_text)
+                except Exception:
+                    pass
+        return JSONResponse({"ok": True, "result": "draw"})
     if winner_user_id not in {str(match["challenger_id"]), str(match["opponent_id"])}:
         return JSONResponse({"ok": False, "error": "invalid_winner"}, status_code=400)
     settled, payout, fee = await settle_match(match, winner_user_id)
@@ -214,6 +233,57 @@ async def chess_result(request: Request) -> JSONResponse:
             except Exception:
                 pass
     return JSONResponse({"ok": True, "match_id": settled["_id"], "winner_user_id": winner_user_id})
+
+
+async def chess_state(request: Request) -> JSONResponse:
+    match_id = request.query_params.get("match_id", "")
+    match = await get_match(match_id)
+    if not match or match["game"] != "chess":
+        return JSONResponse({"ok": False}, status_code=404)
+    return JSONResponse(
+        {
+            "ok": True,
+            "fen": match.get("fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            "turn": match.get("turn", "white"),
+            "challenger_id": match["challenger_id"],
+            "opponent_id": match["opponent_id"],
+            "challenger_color": match.get("challenger_color", "white"),
+            "opponent_color": match.get("opponent_color", "black"),
+            "move_history": match.get("move_history", []),
+            "status": match["status"],
+        }
+    )
+
+
+async def chess_move(request: Request) -> JSONResponse:
+    payload = await request.json()
+    match_id = str(payload.get("match_id", "")).strip()
+    user_id = str(payload.get("user_id", "")).strip()
+    move = str(payload.get("move", "")).strip()
+    match = await get_match(match_id)
+    if not match or match["game"] != "chess" or match["status"] != "active":
+        return JSONResponse({"ok": False, "error": "invalid_match"}, status_code=400)
+    turn = match.get("turn", "white")
+    challenger_color = match.get("challenger_color", "white")
+    if turn == challenger_color:
+        expected_user = str(match["challenger_id"])
+    else:
+        expected_user = str(match["opponent_id"])
+    if user_id != expected_user:
+        return JSONResponse({"ok": False, "error": "not_your_turn"}, status_code=403)
+    history = list(match.get("move_history", []))
+    history.append(move)
+    new_turn = "black" if turn == "white" else "white"
+    new_fen = str(payload.get("fen", "")).strip()
+    await update_match(
+        match_id,
+        {
+            "fen": new_fen,
+            "turn": new_turn,
+            "move_history": history,
+        },
+    )
+    return JSONResponse({"ok": True, "fen": new_fen, "turn": new_turn})
 
 
 @asynccontextmanager
@@ -255,6 +325,8 @@ starlette_app = Starlette(
         Route("/health", health, methods=["GET"]),
         Route("/webhook", webhook, methods=["POST"]),
         Route("/chess", chess_page, methods=["GET"]),
+        Route("/chess_state", chess_state, methods=["GET"]),
+        Route("/chess_move", chess_move, methods=["POST"]),
         Route("/chess_result", chess_result, methods=["POST"]),
     ],
     lifespan=lifespan,
