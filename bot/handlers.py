@@ -101,6 +101,11 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await ensure_current_user(update)
     if not await require_private(update, context):
         return
+    if not settings.ton_enabled:
+        await update.effective_message.reply_text(
+            "TON deposit logic is temporarily disabled in development mode."
+        )
+        return
     await update.effective_message.reply_text(
         "Choose a deposit method. Include your Telegram user ID as memo/comment.",
         reply_markup=deposit_keyboard(),
@@ -111,6 +116,11 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
     if not await require_private(update, context):
+        return
+    if not settings.ton_enabled:
+        await update.effective_message.reply_text(
+            "TON withdrawal logic is temporarily disabled in development mode."
+        )
         return
     if len(context.args) != 2:
         await update.effective_message.reply_text("Usage: /withdraw <amount> <address>")

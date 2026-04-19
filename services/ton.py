@@ -22,7 +22,7 @@ async def ton_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 
 async def fetch_recent_transactions(limit: int = 20) -> list[dict[str, Any]]:
-    if not settings.ton_deposit_address:
+    if not settings.ton_enabled or not settings.ton_deposit_address:
         return []
     params: dict[str, Any] = {"address": settings.ton_deposit_address, "limit": limit}
     if settings.ton_api_key:

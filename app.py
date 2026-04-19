@@ -68,6 +68,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
+        if not settings.ton_enabled:
+            return
         transactions = await safe_fetch_recent_transactions(limit=20)
         if not transactions:
             return
@@ -152,7 +154,10 @@ def build_telegram_application() -> Application:
             "python-telegram-bot was installed without job-queue support. "
             "Install with: python-telegram-bot[job-queue]==20.8"
         )
-    application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=10, name="ton_poll")
+    if settings.ton_enabled:
+        application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=10, name="ton_poll")
+    else:
+        logger.info("TON polling disabled for app_env=%s", settings.app_env)
     application.job_queue.run_repeating(game_expiry, interval=60, first=30, name="game_expiry")
     return application
 

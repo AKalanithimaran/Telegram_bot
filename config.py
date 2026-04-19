@@ -17,6 +17,13 @@ def _parse_admin_ids(value: str) -> set[int]:
     return admin_ids
 
 
+def _parse_bool(value: str, default: bool = False) -> bool:
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -33,10 +40,14 @@ class Settings:
     app_base_url: str
     request_timeout: float
     webhook_path: str
+    app_env: str
+    ton_enabled: bool
 
 
 def load_settings() -> Settings:
     webhook_url = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+    app_env = os.getenv("APP_ENV", "production").strip().lower() or "production"
+    ton_enabled = _parse_bool(os.getenv("ENABLE_TON", ""), default=(app_env != "development"))
     return Settings(
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         mongo_uri=os.getenv("MONGO_URI", "").strip(),
@@ -52,6 +63,8 @@ def load_settings() -> Settings:
         app_base_url=webhook_url,
         request_timeout=float(os.getenv("HTTP_TIMEOUT", "20").strip() or 20),
         webhook_path="/webhook",
+        app_env=app_env,
+        ton_enabled=ton_enabled,
     )
 
 
