@@ -1,46 +1,27 @@
-# Telegram PvP Bot
+# Telegram Gambling Bot
 
-Production-oriented layout for the Telegram PvP bot.
+Webhook-based Telegram gambling bot built with Python, `python-telegram-bot` 20.8, MongoDB, and Render-friendly Starlette hosting.
 
-## Structure
+## Highlights
 
-```text
-src/
-  main.py              # thin compatibility entrypoint
-  pvp_bot/
-    __init__.py
-    __main__.py        # package entrypoint
-    app.py             # application bootstrap
-    config.py          # environment and logging
-    database.py        # SQLite schema and persistence helpers
-    handlers.py        # Telegram command handlers
-    jobs.py            # background jobs
-    match_service.py   # payout, dispute, and match business logic
-    telegram_helpers.py
-    ton.py             # TonCenter integration
-    utils.py
-    assets/
-      chess.html
-data/                  # default SQLite location
-render.yaml
-requirements.txt
-.env.example
-```
+- Webhook-only bot runtime
+- MongoDB via `motor` and `pymongo`
+- TON auto-deposit polling every 30 seconds
+- Dice, football, chess, and MLBB wager flows
+- Admin moderation, balance tools, VIP leaderboard, and house accounting
 
-## Local Run
+## Run Locally
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-PYTHONPATH=src python3 -m pvp_bot
+python app.py
 ```
 
-## Render
+## Important Endpoints
 
-The repo is configured as a worker service and starts with:
-
-```bash
-PYTHONPATH=src python3 -m pvp_bot
-```
+- `GET /health`
+- `POST /webhook`
+- `GET /chess?match_id=...&user_id=...`
+- `POST /chess_result`

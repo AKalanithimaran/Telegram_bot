@@ -1,29 +1,33 @@
 services:
   - type: web
-    name: telegram-pvp-bot
+    name: telegram-gambling-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: PYTHONPATH=src python3 -m pvp_bot
-    healthCheckPath: /
+    startCommand: python app.py
+    healthCheckPath: /health
     envVars:
-      - key: BOT_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: ADMIN_ID
+      - key: MONGO_URI
         sync: false
-      - key: APP_MODE
-        value: webhook
+      - key: ADMIN_IDS
+        sync: false
+      - key: TON_DEPOSIT_ADDRESS
+        sync: false
+      - key: TON_API_KEY
+        sync: false
+      - key: TONCENTER_API_URL
+        value: https://toncenter.com/api/v2
       - key: WEBHOOK_URL
         sync: false
-      - key: WEBHOOK_SECRET_TOKEN
-        sync: false
+      - key: WITHDRAWAL_FEE_PERCENT
+        value: "5"
+      - key: MIN_WAGER_THRESHOLD
+        value: "1000"
       - key: PORT
+        value: "8000"
+      - key: WEBHOOK_SECRET
         sync: false
-      - key: DB_PATH
-        value: /opt/render/project/src/data/pvp_bot.db
-      - key: PLATFORM_TON_WALLET
-        sync: false
-      - key: TONCENTER_API_KEY
-        sync: false
-      - key: TON_WALLET_MNEMONIC
-        sync: false
+      - key: LOG_LEVEL
+        value: INFO

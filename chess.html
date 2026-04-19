@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Match</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: rgba(15, 23, 42, 0.88);
+      --accent: #f59e0b;
+      --accent-2: #38bdf8;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --danger: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Space Grotesk", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.25), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(245, 158, 11, 0.2), transparent 35%),
+        linear-gradient(135deg, #020617, #0f172a 55%, #111827);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .card {
+      width: min(720px, 100%);
+      background: var(--card);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 24px 80px rgba(2, 6, 23, 0.45);
+      backdrop-filter: blur(18px);
+    }
+    h1 { margin-top: 0; font-size: clamp(2rem, 4vw, 3rem); }
+    .lead { color: var(--muted); line-height: 1.6; }
+    .meta {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      margin: 24px 0;
+    }
+    .meta div {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .board {
+      aspect-ratio: 1;
+      border-radius: 18px;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      margin: 24px 0;
+      border: 1px solid rgba(148, 163, 184, 0.15);
+    }
+    .sq:nth-child(16n + 1),
+    .sq:nth-child(16n + 3),
+    .sq:nth-child(16n + 5),
+    .sq:nth-child(16n + 7),
+    .sq:nth-child(16n + 10),
+    .sq:nth-child(16n + 12),
+    .sq:nth-child(16n + 14),
+    .sq:nth-child(16n + 16) { background: #f8fafc; }
+    .sq:nth-child(16n + 2),
+    .sq:nth-child(16n + 4),
+    .sq:nth-child(16n + 6),
+    .sq:nth-child(16n + 8),
+    .sq:nth-child(16n + 9),
+    .sq:nth-child(16n + 11),
+    .sq:nth-child(16n + 13),
+    .sq:nth-child(16n + 15) { background: #0f766e; }
+    .sq { min-height: 48px; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 14px 18px;
+      font: inherit;
+      cursor: pointer;
+      color: #020617;
+      background: linear-gradient(90deg, var(--accent), #fde68a);
+      transition: transform 160ms ease, opacity 160ms ease;
+    }
+    button.alt {
+      background: linear-gradient(90deg, var(--accent-2), #bae6fd);
+    }
+    button.danger {
+      background: linear-gradient(90deg, var(--danger), #fecdd3);
+    }
+    button:hover { transform: translateY(-1px); }
+    #status {
+      margin-top: 18px;
+      color: var(--muted);
+      min-height: 24px;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Chess Match Room</h1>
+    <p class="lead">
+      Open this page from the bot link for your active chess wager. When the game ends, submit the winner below and the bot will validate the active match before paying out.
+    </p>
+    <section class="meta">
+      <div><strong>Match ID</strong><br /><span id="matchId">-</span></div>
+      <div><strong>User ID</strong><br /><span id="userId">-</span></div>
+      <div><strong>Webhook</strong><br /><span id="endpoint">-</span></div>
+    </section>
+    <section class="board" id="board"></section>
+    <div class="actions">
+      <button id="reportSelf">Report My Win</button>
+      <button class="alt" id="reportOpponent">Report Opponent Win</button>
+      <button class="danger" id="copyPayload">Copy Payload</button>
+    </div>
+    <p id="status">Waiting for action.</p>
+  </main>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const matchId = params.get("match_id") || "";
+    const userId = params.get("user_id") || "";
+    const baseUrl = window.location.origin;
+    const endpoint = `${baseUrl}/chess_result`;
+    document.getElementById("matchId").textContent = matchId || "-";
+    document.getElementById("userId").textContent = userId || "-";
+    document.getElementById("endpoint").textContent = endpoint;
+
+    const board = document.getElementById("board");
+    for (let i = 0; i < 64; i += 1) {
+      const sq = document.createElement("div");
+      sq.className = "sq";
+      board.appendChild(sq);
+    }
+
+    async function submitWinner(winnerUserId) {
+      const status = document.getElementById("status");
+      status.textContent = "Submitting result...";
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ match_id: matchId, winner_user_id: winnerUserId })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        status.textContent = `Failed: ${payload.error || response.statusText}`;
+        return;
+      }
+      status.textContent = `Winner submitted successfully for match ${payload.match_id}.`;
+    }
+
+    document.getElementById("reportSelf").addEventListener("click", () => submitWinner(userId));
+    document.getElementById("reportOpponent").addEventListener("click", () => {
+      const opponentId = prompt("Enter the opponent Telegram user ID");
+      if (opponentId) submitWinner(opponentId.trim());
+    });
+    document.getElementById("copyPayload").addEventListener("click", async () => {
+      const payload = JSON.stringify({ match_id: matchId, winner_user_id: userId }, null, 2);
+      await navigator.clipboard.writeText(payload);
+      document.getElementById("status").textContent = "Payload copied to clipboard.";
+    });
+  </script>
+</body>
+</html>

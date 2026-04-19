@@ -1,4 +1,9 @@
-python-telegram-bot[job-queue,webhooks]==20.8
-httpx~=0.26.0
-python-dotenv>=1.0,<2
-tonsdk==1.0.15
+python-telegram-bot==20.8
+APScheduler
+motor
+pymongo
+httpx
+python-dotenv
+uvicorn
+starlette
+nanoid
