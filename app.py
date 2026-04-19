@@ -149,6 +149,11 @@ def build_telegram_application() -> Application:
     application.add_handler(CallbackQueryHandler(accept_callback, pattern=r"^accept:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text_handler))
     application.add_error_handler(error_handler)
+    if application.job_queue is None:
+        raise RuntimeError(
+            "python-telegram-bot was installed without job-queue support. "
+            "Install with python-telegram-bot[job-queue]==20.8."
+        )
     application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=10, name="ton_poll")
     application.job_queue.run_repeating(expire_unfinished_games, interval=60, first=30, name="game_expiry")
     return application
