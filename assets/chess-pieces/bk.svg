@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="bk piece">
+  <defs>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="3" stdDeviation="2.6" flood-color="rgba(0,0,0,0.45)"/>
+    </filter>
+    <linearGradient id="shine" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" fill="transparent"/>
+  <text x="64" y="94" text-anchor="middle" font-size="88" font-family="'Noto Serif', 'DejaVu Serif', serif" fill="#121212" stroke="#cfcfcf" stroke-width="1.8" paint-order="stroke" filter="url(#shadow)">&#9818;</text>
+  <ellipse cx="64" cy="70" rx="34" ry="24" fill="url(#shine)"/>
+</svg>

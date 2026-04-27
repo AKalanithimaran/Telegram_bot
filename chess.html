@@ -6,20 +6,29 @@
   <title>Chess Board</title>
   <style>
     :root {
-      --bg: #07140e;
-      --panel: #0f2319;
-      --panel-2: #132c20;
-      --line: #28463a;
-      --text: #edf4ef;
-      --muted: #a2b7aa;
-      --light: #f3efd8;
-      --dark: #5e7d69;
-      --pick: #98dc8f;
-      --danger: #8b2f2f;
-      --danger-hover: #a13737;
-      --btn: #1d3a2d;
-      --btn-hover: #28513e;
-      --selected: #f6c85f;
+      --app-bg: #6a6aa3;
+      --app-bg-deep: #595c95;
+      --card: #d9d9de;
+      --card-line: #47475f;
+      --board-wrap: #c6c6cb;
+      --board-light: #bcbcbc;
+      --board-dark: #8f8f8f;
+      --text: #24243a;
+      --muted: #5e5f7f;
+      --strip-bg: #d6d6db;
+      --strip-border: #b5b5be;
+      --status-good: #22853d;
+      --status-wait: #7a7a98;
+      --status-bad: #a13a4b;
+      --status-sync: #47537d;
+      --selected: #4d64d3;
+      --move-dot: #6f84ef;
+      --button: #5968b6;
+      --button-hover: #4d5cab;
+      --button-danger: #a74c4c;
+      --button-danger-hover: #944242;
+      --history-head: #cfd0da;
+      --history-row: #e4e5ea;
     }
 
     * {
@@ -33,68 +42,139 @@
     }
 
     body {
-      font-family: "Segoe UI", Tahoma, sans-serif;
-      background:
-        radial-gradient(circle at 25% 0%, #1f4030 0%, #0e2218 40%, #07140e 100%),
-        linear-gradient(130deg, #07140e 0%, #081911 100%);
+      font-family: "Trebuchet MS", "Segoe UI", Tahoma, sans-serif;
       color: var(--text);
-      padding: clamp(10px, 2.8vw, 24px);
+      background:
+        radial-gradient(circle at 50% -8%, #7878b8 0%, var(--app-bg) 45%, var(--app-bg-deep) 100%),
+        linear-gradient(180deg, #7a7bb2 0%, #5e6098 100%);
+      padding: clamp(10px, 3vw, 24px);
     }
 
-    .wrap {
-      width: 100%;
-      max-width: 1040px;
+    .shell {
+      max-width: 920px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-      gap: clamp(12px, 2vw, 18px);
-      align-items: start;
+      gap: 10px;
     }
 
-    .board-panel,
-    .side-panel {
-      background: linear-gradient(180deg, #102619 0%, #0c1f16 100%);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: clamp(12px, 2.2vw, 16px);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    .app-head {
+      background: #272c44;
+      color: #eef1ff;
+      border: 1px solid #2f3550;
+      border-radius: 14px;
+      padding: 10px 14px;
+      box-shadow: 0 8px 22px rgba(20, 20, 45, 0.26);
     }
 
-    .title {
+    .app-title {
       margin: 0;
-      font-size: clamp(20px, 2.5vw, 26px);
-      line-height: 1.1;
+      font-size: clamp(22px, 4.4vw, 34px);
+      line-height: 1.05;
       letter-spacing: 0.2px;
     }
 
+    .player-strip {
+      background: linear-gradient(180deg, #e4e5ea 0%, var(--strip-bg) 100%);
+      border: 1px solid var(--strip-border);
+      border-radius: 14px;
+      min-height: 84px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      gap: 12px;
+    }
+
+    .player-main {
+      min-width: 0;
+    }
+
+    .player-name {
+      margin: 0;
+      font-size: clamp(21px, 4.1vw, 38px);
+      line-height: 1;
+      letter-spacing: 0.2px;
+      color: #40408e;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .player-sub {
+      margin: 5px 0 0;
+      color: #4d4f70;
+      font-size: clamp(14px, 2.7vw, 17px);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 7px;
+      padding: 2px 8px;
+      line-height: 1;
+      font-weight: 700;
+      font-size: clamp(13px, 2.6vw, 16px);
+      color: #eef5ff;
+      background: #3f57ae;
+    }
+
+    .pill.playing {
+      background: var(--status-good);
+    }
+
+    .pill.waiting {
+      background: #6f7196;
+    }
+
+    .pill.offline {
+      background: #8f4c4c;
+    }
+
+    .board-card {
+      background: linear-gradient(180deg, #d6d6db 0%, var(--card) 100%);
+      border: 1px solid var(--card-line);
+      border-radius: 16px;
+      padding: clamp(10px, 2.7vw, 16px);
+      box-shadow: 0 12px 30px rgba(27, 27, 48, 0.26);
+    }
+
     .status {
-      margin: 8px 0 14px;
-      min-height: 24px;
-      color: var(--muted);
-      font-weight: 600;
+      margin: 0 0 10px;
+      min-height: 22px;
+      font-size: clamp(14px, 2.9vw, 18px);
+      font-weight: 700;
+      color: var(--status-sync);
       letter-spacing: 0.2px;
     }
 
     .status.you-turn {
-      color: #c9f9cb;
+      color: var(--status-good);
     }
 
     .status.waiting {
-      color: #b8ccf4;
+      color: var(--status-wait);
     }
 
     .status.error {
-      color: #f8b3b3;
+      color: var(--status-bad);
     }
 
     .status.sync {
-      color: #cde8db;
+      color: var(--status-sync);
     }
 
     .board-wrap {
       width: 100%;
-      max-width: min(92vw, 640px);
+      max-width: min(96vw, 690px);
       margin: 0 auto;
+      background: linear-gradient(180deg, #d0d1d7 0%, var(--board-wrap) 100%);
+      border: 1px solid #9da0b7;
+      border-radius: 12px;
+      padding: clamp(8px, 1.8vw, 13px);
     }
 
     .board {
@@ -103,14 +183,14 @@
       display: grid;
       grid-template-columns: repeat(8, minmax(0, 1fr));
       grid-template-rows: repeat(8, minmax(0, 1fr));
-      border: 1px solid #345344;
-      border-radius: 12px;
+      border: 1px solid #80829b;
+      border-radius: 8px;
       overflow: hidden;
       user-select: none;
       -webkit-user-select: none;
       touch-action: manipulation;
-      background: #1e3529;
-      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
+      box-shadow: 0 4px 12px rgba(37, 38, 53, 0.26);
+      background: #9d9da6;
     }
 
     .sq {
@@ -127,24 +207,24 @@
       cursor: pointer;
       position: relative;
       line-height: 1;
-      font-size: clamp(24px, 5.3vw, 44px);
       transition: transform 120ms ease, filter 120ms ease;
+      overflow: hidden;
     }
 
     .sq:focus-visible {
-      outline: 2px solid #d6f5de;
+      outline: 2px solid #405ccf;
       outline-offset: -2px;
       z-index: 3;
     }
 
     .sq.light {
-      background: var(--light);
-      color: #1a2431;
+      background: var(--board-light);
+      color: #212430;
     }
 
     .sq.dark {
-      background: var(--dark);
-      color: #eef7f2;
+      background: var(--board-dark);
+      color: #f4f5f8;
     }
 
     .sq.selected {
@@ -154,13 +234,34 @@
 
     .sq.move::after {
       content: "";
-      width: 30%;
+      width: 32%;
       aspect-ratio: 1 / 1;
       border-radius: 999px;
-      background: rgba(152, 220, 143, 0.9);
-      opacity: 0.9;
+      background: var(--move-dot);
+      box-shadow: 0 0 0 2px rgba(72, 82, 138, 0.26);
+      opacity: 0.95;
       position: absolute;
       pointer-events: none;
+    }
+
+    .piece-img {
+      width: 84%;
+      height: 84%;
+      object-fit: contain;
+      pointer-events: none;
+      filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.28));
+    }
+
+    .piece-fallback {
+      font-size: clamp(23px, 5.6vw, 48px);
+      line-height: 1;
+      display: none;
+      pointer-events: none;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.28);
+    }
+
+    .piece-fallback.show {
+      display: inline;
     }
 
     .sq:active {
@@ -168,61 +269,102 @@
     }
 
     .coords {
-      margin-top: 9px;
+      margin-top: 8px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       color: var(--muted);
-      font-size: 12px;
-      letter-spacing: 0.28em;
-      font-weight: 600;
+      font-size: clamp(11px, 2.1vw, 13px);
+      letter-spacing: 0.19em;
+      font-weight: 700;
       padding: 0 2px;
+      text-transform: lowercase;
+    }
+
+    .controls {
+      border: 1px solid #7f82a0;
+      border-radius: 14px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #d2d4e0 0%, #c6c8d6 100%);
+    }
+
+    .controls summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 11px 13px;
+      font-weight: 700;
+      color: #2f3259;
+      font-size: clamp(14px, 3vw, 16px);
+      user-select: none;
+    }
+
+    .controls summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .controls summary::after {
+      content: "▾";
+      float: right;
+      transition: transform 140ms ease;
+      color: #40457a;
+    }
+
+    .controls[open] summary::after {
+      transform: rotate(180deg);
+    }
+
+    .controls-content {
+      border-top: 1px solid #9b9db2;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
     }
 
     .meta {
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-      margin-bottom: 10px;
+      background: #e5e6ed;
+      border: 1px solid #acafc4;
+      border-radius: 10px;
+      padding: 9px 10px;
+      display: grid;
+      gap: 5px;
     }
 
     .meta p {
-      margin: 4px 0;
-      color: var(--muted);
-      font-size: clamp(13px, 2.7vw, 14px);
+      margin: 0;
+      color: #4a4d68;
+      font-size: clamp(13px, 2.8vw, 14px);
       word-break: break-word;
     }
 
     .meta strong {
-      color: var(--text);
+      color: #2e3251;
     }
 
     .actions {
       display: flex;
       gap: 9px;
       flex-wrap: wrap;
-      margin-bottom: 10px;
     }
 
     button {
       appearance: none;
       -webkit-appearance: none;
-      border: 1px solid #3f6451;
-      background: var(--btn);
-      color: var(--text);
+      border: 1px solid #4555aa;
+      background: var(--button);
+      color: #f1f4ff;
       padding: 10px 14px;
       border-radius: 10px;
       font-size: 14px;
-      font-weight: 600;
+      font-weight: 700;
       letter-spacing: 0.2px;
       cursor: pointer;
       transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
+      box-shadow: 0 2px 4px rgba(34, 36, 58, 0.2);
     }
 
     button:hover {
-      background: var(--btn-hover);
-      border-color: #5e866f;
+      background: var(--button-hover);
+      border-color: #3c4c9f;
     }
 
     button:disabled {
@@ -231,26 +373,26 @@
     }
 
     .danger {
-      border-color: #8d3d3d;
-      background: var(--danger);
-      color: #ffe8e8;
+      border-color: #914242;
+      background: var(--button-danger);
+      color: #fff2f2;
     }
 
     .danger:hover {
-      background: var(--danger-hover);
-      border-color: #aa4f4f;
+      background: var(--button-danger-hover);
+      border-color: #823a3a;
     }
 
     .history {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #0a1711;
-      max-height: min(56vh, 420px);
+      border: 1px solid #a8abbd;
+      border-radius: 10px;
+      background: #ececf2;
+      max-height: min(52vh, 390px);
       overflow: auto;
     }
 
     .history-empty {
-      color: var(--muted);
+      color: #6e718c;
       font-size: 14px;
       padding: 12px;
     }
@@ -269,22 +411,23 @@
       position: sticky;
       top: 0;
       z-index: 1;
-      background: #102218;
-      color: #cde3d6;
-      border-bottom: 1px solid #294434;
-      font-weight: 700;
+      background: var(--history-head);
+      color: #454b6f;
+      border-bottom: 1px solid #a7abc2;
+      font-weight: 800;
       letter-spacing: 0.2px;
     }
 
     .history-row {
-      color: #d4e3da;
-      border-bottom: 1px solid #1e3428;
+      color: #3d415e;
+      border-bottom: 1px solid #d4d6e4;
+      background: var(--history-row);
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size: 12.5px;
     }
 
     .history-row:nth-child(even) {
-      background: rgba(255, 255, 255, 0.015);
+      background: #e7e8ee;
     }
 
     .history-row:last-child {
@@ -292,7 +435,7 @@
     }
 
     .history-turn {
-      color: #8fb7a0;
+      color: #555a7d;
       font-weight: 700;
       text-align: right;
       padding-right: 2px;
@@ -302,13 +445,17 @@
       min-height: 16px;
     }
 
-    @media (max-width: 900px) {
-      .wrap {
-        grid-template-columns: 1fr;
+    @media (max-width: 700px) {
+      .player-strip {
+        min-height: 76px;
       }
 
-      .history {
-        max-height: min(38vh, 340px);
+      .controls {
+        border-radius: 12px;
+      }
+
+      .actions button {
+        flex: 1 1 auto;
       }
     }
 
@@ -317,14 +464,14 @@
         padding: 8px;
       }
 
-      .board-panel,
-      .side-panel {
-        border-radius: 14px;
-        padding: 10px;
+      .player-strip {
+        border-radius: 12px;
+        padding: 8px 10px;
       }
 
-      .actions button {
-        flex: 1 1 auto;
+      .board-card {
+        border-radius: 14px;
+        padding: 9px;
       }
 
       .history-head,
@@ -337,9 +484,22 @@
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <section class="board-panel">
-      <h1 class="title">Chess Match</h1>
+  <div class="shell">
+    <header class="app-head">
+      <h1 class="app-title">GameFactory Chess</h1>
+    </header>
+
+    <section class="player-strip" aria-label="Black player">
+      <div class="player-main">
+        <p class="player-name" id="topPlayerName">Black Player</p>
+        <p class="player-sub">
+          <span id="topPlayerTag">@user</span>
+          <span class="pill waiting" id="topPlayerState">Waiting</span>
+        </p>
+      </div>
+    </section>
+
+    <section class="board-card">
       <p class="status" id="turnStatus">Loading board...</p>
       <div class="board-wrap">
         <div class="board" id="board"></div>
@@ -349,18 +509,32 @@
         </div>
       </div>
     </section>
-    <aside class="side-panel">
-      <div class="meta">
-        <p><strong>Match ID:</strong> <span id="matchId">-</span></p>
-        <p><strong>User ID:</strong> <span id="userId">-</span></p>
-        <p><strong>Your Color:</strong> <span id="myColor">-</span></p>
+
+    <section class="player-strip" aria-label="White player">
+      <div class="player-main">
+        <p class="player-name" id="bottomPlayerName">White Player</p>
+        <p class="player-sub">
+          <span id="bottomPlayerTag">@user</span>
+          <span class="pill waiting" id="bottomPlayerState">Waiting</span>
+        </p>
       </div>
-      <div class="actions">
-        <button id="refreshBtn" type="button">Refresh</button>
-        <button id="resignBtn" type="button" class="danger">Resign</button>
+    </section>
+
+    <details class="controls" open>
+      <summary>Match Controls &amp; History</summary>
+      <div class="controls-content">
+        <div class="actions">
+          <button id="refreshBtn" type="button">Refresh</button>
+          <button id="resignBtn" type="button" class="danger">Resign</button>
+        </div>
+        <div class="meta">
+          <p><strong>Match ID:</strong> <span id="matchId">-</span></p>
+          <p><strong>User ID:</strong> <span id="userId">-</span></p>
+          <p><strong>Your Color:</strong> <span id="myColor">-</span></p>
+        </div>
+        <div class="history" id="history"></div>
       </div>
-      <div class="history" id="history"></div>
-    </aside>
+    </details>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
@@ -368,6 +542,20 @@
     const PIECES = {
       P: "♙", N: "♘", B: "♗", R: "♖", Q: "♕", K: "♔",
       p: "♟", n: "♞", b: "♝", r: "♜", q: "♛", k: "♚",
+    };
+    const PIECE_ASSETS = {
+      P: "/assets/chess-pieces/wp.svg",
+      N: "/assets/chess-pieces/wn.svg",
+      B: "/assets/chess-pieces/wb.svg",
+      R: "/assets/chess-pieces/wr.svg",
+      Q: "/assets/chess-pieces/wq.svg",
+      K: "/assets/chess-pieces/wk.svg",
+      p: "/assets/chess-pieces/bp.svg",
+      n: "/assets/chess-pieces/bn.svg",
+      b: "/assets/chess-pieces/bb.svg",
+      r: "/assets/chess-pieces/br.svg",
+      q: "/assets/chess-pieces/bq.svg",
+      k: "/assets/chess-pieces/bk.svg",
     };
     const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
     const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
@@ -381,6 +569,13 @@
     const historyEl = document.getElementById("history");
     const turnStatusEl = document.getElementById("turnStatus");
     const refreshBtn = document.getElementById("refreshBtn");
+
+    const topPlayerNameEl = document.getElementById("topPlayerName");
+    const topPlayerTagEl = document.getElementById("topPlayerTag");
+    const topPlayerStateEl = document.getElementById("topPlayerState");
+    const bottomPlayerNameEl = document.getElementById("bottomPlayerName");
+    const bottomPlayerTagEl = document.getElementById("bottomPlayerTag");
+    const bottomPlayerStateEl = document.getElementById("bottomPlayerState");
 
     document.getElementById("matchId").textContent = matchId || "-";
     document.getElementById("userId").textContent = userId || "-";
@@ -420,6 +615,35 @@
       return result;
     }
 
+    function updatePieceNode(cell, piece) {
+      if (!piece) return;
+
+      const fallback = document.createElement("span");
+      fallback.className = "piece-fallback";
+      fallback.textContent = PIECES[piece] || "";
+
+      const assetSrc = PIECE_ASSETS[piece] || "";
+      if (!assetSrc) {
+        fallback.classList.add("show");
+        cell.appendChild(fallback);
+        return;
+      }
+
+      const img = document.createElement("img");
+      img.className = "piece-img";
+      img.src = assetSrc;
+      img.alt = piece;
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.onerror = () => {
+        img.remove();
+        fallback.classList.add("show");
+      };
+
+      cell.appendChild(img);
+      cell.appendChild(fallback);
+    }
+
     function renderBoard() {
       boardEl.innerHTML = "";
       const board = parseBoard(chess.fen());
@@ -433,7 +657,7 @@
           if (selectedSquare === square) cell.classList.add("selected");
           if (legalMoves.includes(square)) cell.classList.add("move");
           cell.dataset.square = square;
-          cell.textContent = piece ? PIECES[piece] : "";
+          updatePieceNode(cell, piece);
           cell.addEventListener("click", onSquareClick);
           boardEl.appendChild(cell);
         }
@@ -514,6 +738,58 @@
       } else {
         setStatus("Opponent's turn", "waiting");
       }
+    }
+
+    function setPlayerStateBadge(el, mode) {
+      el.classList.remove("playing", "waiting", "offline");
+      if (mode === "playing") {
+        el.classList.add("playing");
+        el.textContent = "Playing";
+      } else if (mode === "offline") {
+        el.classList.add("offline");
+        el.textContent = "Not joined";
+      } else {
+        el.classList.add("waiting");
+        el.textContent = "Waiting";
+      }
+    }
+
+    function formatPlayerName(label, id) {
+      if (!id || id === "-") return `${label} Player`;
+      if (id === userId) return `You (${id})`;
+      return `${label} ${id}`;
+    }
+
+    function updatePlayerCards() {
+      if (!state) return;
+
+      const challengerId = String(state.challenger_id || "-");
+      const opponentId = state.opponent_id ? String(state.opponent_id) : "-";
+      const hasOpponent = Boolean(state.opponent_id);
+
+      const whiteId = state.challenger_color === "white" ? challengerId : opponentId;
+      const blackId = state.challenger_color === "black" ? challengerId : opponentId;
+
+      topPlayerNameEl.textContent = formatPlayerName("Black", blackId);
+      topPlayerTagEl.textContent = blackId && blackId !== "-" ? `ID: ${blackId}` : "Waiting for player";
+
+      bottomPlayerNameEl.textContent = formatPlayerName("White", whiteId);
+      bottomPlayerTagEl.textContent = whiteId && whiteId !== "-" ? `ID: ${whiteId}` : "Waiting for player";
+
+      if (!hasOpponent) {
+        setPlayerStateBadge(topPlayerStateEl, "offline");
+        setPlayerStateBadge(bottomPlayerStateEl, whiteId === userId ? "playing" : "waiting");
+        return;
+      }
+
+      if (state.status !== "active") {
+        setPlayerStateBadge(topPlayerStateEl, "waiting");
+        setPlayerStateBadge(bottomPlayerStateEl, "waiting");
+        return;
+      }
+
+      setPlayerStateBadge(topPlayerStateEl, state.turn === "black" ? "playing" : "waiting");
+      setPlayerStateBadge(bottomPlayerStateEl, state.turn === "white" ? "playing" : "waiting");
     }
 
     function clearSelection() {
@@ -632,6 +908,7 @@
 
       renderHistory((state.move_history || []).map(String));
       updateTurnStatus();
+      updatePlayerCards();
       await handleGameEnd();
     }
 
@@ -685,6 +962,7 @@
 
         renderHistory((state.move_history || []).map(String));
         updateTurnStatus();
+        updatePlayerCards();
       })();
 
       try {
@@ -713,6 +991,7 @@
       const winnerId = myColor === "white" ? String(state.opponent_id) : String(state.challenger_id);
       await postResult(winnerId);
       setStatus("You resigned.", "sync");
+      updatePlayerCards();
     });
 
     void loadState(true).then(() => {

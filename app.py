@@ -12,7 +12,8 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -448,6 +449,7 @@ async def lifespan(_: Starlette):
 starlette_app = Starlette(
     debug=False,
     routes=[
+        Mount("/assets", app=StaticFiles(directory=Path(__file__).with_name("assets")), name="assets"),
         Route("/", health, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route("/health/ready", ready, methods=["GET"]),
