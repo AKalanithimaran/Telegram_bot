@@ -357,8 +357,17 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # ── Post challenge card ──────────────────────────────────────────────────────
+    try:
+        summary_text = challenge_summary(match, user)
+    except Exception:
+        logger.exception("challenge_summary failed for match_id=%s", match.get("_id"))
+        summary_text = (
+            "PvP Challenge\n"
+            f"Match ID: `{match['_id']}`\n"
+            f"Bet: {format_amount(float(match['amount']))} TON"
+        )
     await update.effective_message.reply_text(
-        challenge_summary(match, user),
+        summary_text,
         reply_markup=accept_challenge_keyboard(match["_id"]),
     )
 

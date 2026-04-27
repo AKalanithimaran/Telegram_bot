@@ -35,18 +35,23 @@ def sandbox_note() -> str:
     return "Sandbox mode: TON economy is disabled."
 
 
-def challenge_summary(match: dict[str, Any], challenger: dict[str, Any]) -> str:
+def format_game_label(match: dict[str, Any]) -> str:
     game = str(match.get("game", "")).lower()
-    mode = str(match.get("mode", "normal")).lower()
-    dice_count = int(match.get("dice_count", 1))
     if game == "dice":
-        game_label = f"Dice ({mode.title()}, {dice_count})"
-    elif game == "football":
-        game_label = f"Football ({mode.title()}, {dice_count})"
-    elif game == "chess":
-        game_label = "Chess"
-    else:
-        game_label = "MLBB"
+        mode = str(match.get("mode") or "normal").lower()
+        dice_count = int(match.get("dice_count") or 1)
+        return f"Dice ({mode.title()}, {dice_count})"
+    if game == "football":
+        mode = str(match.get("mode") or "normal").lower()
+        dice_count = int(match.get("dice_count") or 1)
+        return f"Football ({mode.title()}, {dice_count})"
+    if game == "chess":
+        return "Chess"
+    return "MLBB"
+
+
+def challenge_summary(match: dict[str, Any], challenger: dict[str, Any]) -> str:
+    game_label = format_game_label(match)
     lines = [
         "PvP Challenge",
         f"Match ID: `{match['_id']}`",
@@ -80,8 +85,8 @@ async def create_challenge(
 
 async def post_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, match: dict[str, Any]) -> None:
     game = str(match["game"])
-    mode = str(match.get("mode", "normal"))
-    dice_count = int(match.get("dice_count", 1))
+    mode = str(match.get("mode") or "normal")
+    dice_count = int(match.get("dice_count") or 1)
     amount = float(match["amount"])
     challenger = await get_user(match["challenger_id"])
     if game == "dice":
