@@ -6,156 +6,332 @@
   <title>Chess Board</title>
   <style>
     :root {
-      --bg: #0e1512;
-      --panel: #17251d;
-      --line: #2a3a32;
-      --text: #e7efe9;
-      --muted: #9bb2a3;
-      --accent: #7de08f;
-      --light: #f1efd8;
-      --dark: #5b7a64;
-      --pick: #87ce89;
-      --danger: #e36f6f;
+      --bg: #07140e;
+      --panel: #0f2319;
+      --panel-2: #132c20;
+      --line: #28463a;
+      --text: #edf4ef;
+      --muted: #a2b7aa;
+      --light: #f3efd8;
+      --dark: #5e7d69;
+      --pick: #98dc8f;
+      --danger: #8b2f2f;
+      --danger-hover: #a13737;
+      --btn: #1d3a2d;
+      --btn-hover: #28513e;
+      --selected: #f6c85f;
     }
+
     * {
       box-sizing: border-box;
     }
+
+    html,
     body {
       margin: 0;
-      font-family: "Segoe UI", Tahoma, sans-serif;
-      background: radial-gradient(circle at top, #1b2e25, var(--bg) 50%);
-      color: var(--text);
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 12px;
+      min-height: 100%;
     }
+
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background:
+        radial-gradient(circle at 25% 0%, #1f4030 0%, #0e2218 40%, #07140e 100%),
+        linear-gradient(130deg, #07140e 0%, #081911 100%);
+      color: var(--text);
+      padding: clamp(10px, 2.8vw, 24px);
+    }
+
     .wrap {
       width: 100%;
-      max-width: 980px;
+      max-width: 1040px;
+      margin: 0 auto;
       display: grid;
-      grid-template-columns: minmax(280px, 560px) minmax(240px, 360px);
-      gap: 16px;
+      grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+      gap: clamp(12px, 2vw, 18px);
+      align-items: start;
     }
+
     .board-panel,
     .side-panel {
-      background: var(--panel);
+      background: linear-gradient(180deg, #102619 0%, #0c1f16 100%);
       border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
+      border-radius: 16px;
+      padding: clamp(12px, 2.2vw, 16px);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     }
+
     .title {
-      margin: 0 0 8px;
-      font-size: 20px;
-      letter-spacing: 0.3px;
+      margin: 0;
+      font-size: clamp(20px, 2.5vw, 26px);
+      line-height: 1.1;
+      letter-spacing: 0.2px;
     }
+
     .status {
-      margin: 0 0 12px;
+      margin: 8px 0 14px;
+      min-height: 24px;
       color: var(--muted);
-      min-height: 20px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
     }
+
+    .status.you-turn {
+      color: #c9f9cb;
+    }
+
+    .status.waiting {
+      color: #b8ccf4;
+    }
+
+    .status.error {
+      color: #f8b3b3;
+    }
+
+    .status.sync {
+      color: #cde8db;
+    }
+
+    .board-wrap {
+      width: 100%;
+      max-width: min(92vw, 640px);
+      margin: 0 auto;
+    }
+
     .board {
       width: 100%;
       aspect-ratio: 1 / 1;
       display: grid;
-      grid-template-columns: repeat(8, 1fr);
-      border: 1px solid #24342c;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      grid-template-rows: repeat(8, minmax(0, 1fr));
+      border: 1px solid #345344;
+      border-radius: 12px;
       overflow: hidden;
-      border-radius: 10px;
       user-select: none;
+      -webkit-user-select: none;
       touch-action: manipulation;
+      background: #1e3529;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
     }
+
     .sq {
-      position: relative;
+      appearance: none;
+      -webkit-appearance: none;
+      border: 0;
+      margin: 0;
+      border-radius: 0;
+      padding: 0;
       display: grid;
       place-items: center;
-      font-size: clamp(28px, 4vw, 42px);
+      width: 100%;
+      height: 100%;
       cursor: pointer;
+      position: relative;
+      line-height: 1;
+      font-size: clamp(24px, 5.3vw, 44px);
+      transition: transform 120ms ease, filter 120ms ease;
     }
+
+    .sq:focus-visible {
+      outline: 2px solid #d6f5de;
+      outline-offset: -2px;
+      z-index: 3;
+    }
+
     .sq.light {
       background: var(--light);
-      color: #1f2937;
+      color: #1a2431;
     }
+
     .sq.dark {
       background: var(--dark);
-      color: #f8fafc;
+      color: #eef7f2;
     }
+
     .sq.selected {
-      outline: 3px solid #ffe082;
-      outline-offset: -3px;
+      box-shadow: inset 0 0 0 3px var(--selected);
+      z-index: 2;
     }
+
     .sq.move::after {
       content: "";
       width: 30%;
-      height: 30%;
+      aspect-ratio: 1 / 1;
       border-radius: 999px;
-      background: var(--pick);
-      opacity: 0.88;
+      background: rgba(152, 220, 143, 0.9);
+      opacity: 0.9;
       position: absolute;
+      pointer-events: none;
     }
+
+    .sq:active {
+      transform: scale(0.985);
+    }
+
     .coords {
-      margin-top: 8px;
+      margin-top: 9px;
       display: flex;
       justify-content: space-between;
+      align-items: center;
       color: var(--muted);
       font-size: 12px;
+      letter-spacing: 0.28em;
+      font-weight: 600;
+      padding: 0 2px;
     }
+
+    .meta {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
     .meta p {
-      margin: 5px 0;
+      margin: 4px 0;
       color: var(--muted);
-      font-size: 14px;
-      word-break: break-all;
+      font-size: clamp(13px, 2.7vw, 14px);
+      word-break: break-word;
     }
+
     .meta strong {
       color: var(--text);
     }
+
     .actions {
-      margin-top: 10px;
       display: flex;
-      gap: 8px;
+      gap: 9px;
       flex-wrap: wrap;
+      margin-bottom: 10px;
     }
+
     button {
-      border: 1px solid #355343;
-      background: #1f3329;
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid #3f6451;
+      background: var(--btn);
       color: var(--text);
-      padding: 10px 12px;
+      padding: 10px 14px;
       border-radius: 10px;
       font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
       cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
     }
+
     button:hover {
-      background: #284135;
+      background: var(--btn-hover);
+      border-color: #5e866f;
     }
+
+    button:disabled {
+      opacity: 0.66;
+      cursor: not-allowed;
+    }
+
     .danger {
-      border-color: #6f2d2d;
-      background: #552525;
-      color: #ffd9d9;
+      border-color: #8d3d3d;
+      background: var(--danger);
+      color: #ffe8e8;
     }
+
     .danger:hover {
-      background: #6a2f2f;
+      background: var(--danger-hover);
+      border-color: #aa4f4f;
     }
+
     .history {
-      margin-top: 10px;
       border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #111a15;
-      max-height: 360px;
+      border-radius: 12px;
+      background: #0a1711;
+      max-height: min(56vh, 420px);
       overflow: auto;
-      padding: 8px 10px;
     }
-    .history-item {
-      font-size: 13px;
+
+    .history-empty {
       color: var(--muted);
-      padding: 4px 0;
-      border-bottom: 1px solid #23342b;
+      font-size: 14px;
+      padding: 12px;
     }
-    .history-item:last-child {
+
+    .history-head,
+    .history-row {
+      display: grid;
+      grid-template-columns: 58px 1fr 1fr;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .history-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #102218;
+      color: #cde3d6;
+      border-bottom: 1px solid #294434;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .history-row {
+      color: #d4e3da;
+      border-bottom: 1px solid #1e3428;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12.5px;
+    }
+
+    .history-row:nth-child(even) {
+      background: rgba(255, 255, 255, 0.015);
+    }
+
+    .history-row:last-child {
       border-bottom: 0;
     }
-    @media (max-width: 860px) {
+
+    .history-turn {
+      color: #8fb7a0;
+      font-weight: 700;
+      text-align: right;
+      padding-right: 2px;
+    }
+
+    .history-move {
+      min-height: 16px;
+    }
+
+    @media (max-width: 900px) {
       .wrap {
         grid-template-columns: 1fr;
+      }
+
+      .history {
+        max-height: min(38vh, 340px);
+      }
+    }
+
+    @media (max-width: 520px) {
+      body {
+        padding: 8px;
+      }
+
+      .board-panel,
+      .side-panel {
+        border-radius: 14px;
+        padding: 10px;
+      }
+
+      .actions button {
+        flex: 1 1 auto;
+      }
+
+      .history-head,
+      .history-row {
+        grid-template-columns: 48px 1fr 1fr;
+        gap: 6px;
+        padding: 7px 8px;
       }
     }
   </style>
@@ -165,10 +341,12 @@
     <section class="board-panel">
       <h1 class="title">Chess Match</h1>
       <p class="status" id="turnStatus">Loading board...</p>
-      <div class="board" id="board"></div>
-      <div class="coords">
-        <span>a b c d e f g h</span>
-        <span>8 7 6 5 4 3 2 1</span>
+      <div class="board-wrap">
+        <div class="board" id="board"></div>
+        <div class="coords">
+          <span>a b c d e f g h</span>
+          <span>8 7 6 5 4 3 2 1</span>
+        </div>
       </div>
     </section>
     <aside class="side-panel">
@@ -184,6 +362,7 @@
       <div class="history" id="history"></div>
     </aside>
   </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
   <script>
     const PIECES = {
@@ -192,6 +371,7 @@
     };
     const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
     const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
+    const INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
     const params = new URLSearchParams(window.location.search);
     const matchId = (params.get("match_id") || "").trim();
@@ -200,7 +380,8 @@
     const boardEl = document.getElementById("board");
     const historyEl = document.getElementById("history");
     const turnStatusEl = document.getElementById("turnStatus");
-    const myColorEl = document.getElementById("myColor");
+    const refreshBtn = document.getElementById("refreshBtn");
+
     document.getElementById("matchId").textContent = matchId || "-";
     document.getElementById("userId").textContent = userId || "-";
 
@@ -212,6 +393,9 @@
     let lastFen = "";
     let pollTimer = null;
     let finished = false;
+    let syncing = false;
+    let pendingForceRefresh = false;
+    let stateRequestInFlight = null;
 
     function sqName(fileIndex, rankIndex) {
       return `${FILES[fileIndex]}${RANKS[rankIndex]}`;
@@ -246,12 +430,8 @@
           const cell = document.createElement("button");
           cell.type = "button";
           cell.className = `sq ${(r + f) % 2 === 0 ? "light" : "dark"}`;
-          if (selectedSquare === square) {
-            cell.classList.add("selected");
-          }
-          if (legalMoves.includes(square)) {
-            cell.classList.add("move");
-          }
+          if (selectedSquare === square) cell.classList.add("selected");
+          if (legalMoves.includes(square)) cell.classList.add("move");
           cell.dataset.square = square;
           cell.textContent = piece ? PIECES[piece] : "";
           cell.addEventListener("click", onSquareClick);
@@ -263,19 +443,51 @@
     function renderHistory(history) {
       historyEl.innerHTML = "";
       if (!history || history.length === 0) {
-        historyEl.textContent = "No moves yet.";
+        const empty = document.createElement("div");
+        empty.className = "history-empty";
+        empty.textContent = "No moves yet.";
+        historyEl.appendChild(empty);
         return;
       }
-      history.forEach((mv, idx) => {
+
+      const head = document.createElement("div");
+      head.className = "history-head";
+      head.innerHTML = "<div>#</div><div>White</div><div>Black</div>";
+      historyEl.appendChild(head);
+
+      for (let i = 0; i < history.length; i += 2) {
         const row = document.createElement("div");
-        row.className = "history-item";
-        row.textContent = `${idx + 1}. ${mv}`;
+        row.className = "history-row";
+
+        const turn = document.createElement("div");
+        turn.className = "history-turn";
+        turn.textContent = `${Math.floor(i / 2) + 1}.`;
+
+        const white = document.createElement("div");
+        white.className = "history-move";
+        white.textContent = String(history[i] || "");
+
+        const black = document.createElement("div");
+        black.className = "history-move";
+        black.textContent = String(history[i + 1] || "");
+
+        row.appendChild(turn);
+        row.appendChild(white);
+        row.appendChild(black);
         historyEl.appendChild(row);
-      });
+      }
     }
 
-    function setStatus(text) {
+    function setSyncing(isSyncing) {
+      syncing = isSyncing;
+      refreshBtn.disabled = isSyncing;
+      refreshBtn.textContent = isSyncing ? "Syncing..." : "Refresh";
+    }
+
+    function setStatus(text, tone = "") {
       turnStatusEl.textContent = text;
+      turnStatusEl.classList.remove("you-turn", "waiting", "error", "sync");
+      if (tone) turnStatusEl.classList.add(tone);
     }
 
     function isMyTurn() {
@@ -286,17 +498,21 @@
     function updateTurnStatus() {
       if (finished) return;
       if (!state) {
-        setStatus("Loading...");
+        setStatus("Loading...", "sync");
         return;
       }
       if (state.status !== "active") {
-        setStatus(`Match status: ${state.status}`);
+        setStatus(`Match status: ${state.status}`, "sync");
+        return;
+      }
+      if (!myColor) {
+        setStatus("Spectator mode", "sync");
         return;
       }
       if (isMyTurn()) {
-        setStatus("Your turn");
+        setStatus("Your turn", "you-turn");
       } else {
-        setStatus("Opponent's turn");
+        setStatus("Opponent's turn", "waiting");
       }
     }
 
@@ -312,7 +528,7 @@
     }
 
     async function postMove(from, to) {
-      let move = chess.move({ from, to, promotion: "q" });
+      const move = chess.move({ from, to, promotion: "q" });
       if (!move) return false;
       const uci = `${move.from}${move.to}${move.promotion || ""}`;
       const response = await fetch("/chess_move", {
@@ -329,14 +545,17 @@
       if (!response.ok) {
         chess.undo();
         if (payload.error === "not_your_turn") {
-          setStatus("Wait for opponent's move");
+          setStatus("Wait for opponent's move", "waiting");
         } else {
-          setStatus("Move rejected by server");
+          setStatus("Move rejected by server", "error");
         }
         return false;
       }
+
       state.fen = payload.fen;
       state.turn = payload.turn;
+      if (!Array.isArray(state.move_history)) state.move_history = [];
+      state.move_history = [...state.move_history, uci];
       lastFen = payload.fen;
       return true;
     }
@@ -361,12 +580,12 @@
           ? userId
           : (myColor === "white" ? String(state.opponent_id) : String(state.challenger_id));
         await postResult(winnerId);
-        setStatus(winnerId === userId ? "You Won!" : "You Lost");
+        setStatus(winnerId === userId ? "You Won!" : "You Lost", "sync");
         return;
       }
       if (chess.in_stalemate() || chess.in_draw()) {
         await postResult("draw");
-        setStatus("Draw. Bets refunded.");
+        setStatus("Draw. Bets refunded.", "sync");
       }
     }
 
@@ -374,9 +593,10 @@
       if (finished || !state || state.status !== "active") return;
       const square = event.currentTarget.dataset.square;
       if (!isMyTurn()) {
-        setStatus("Wait for opponent's move");
+        setStatus("Wait for opponent's move", "waiting");
         return;
       }
+
       const piece = chess.get(square);
       if (!selectedSquare) {
         if (!piece) return;
@@ -386,14 +606,17 @@
         renderBoard();
         return;
       }
+
       if (square === selectedSquare) {
         clearSelection();
         renderBoard();
         return;
       }
+
       const from = selectedSquare;
       const validTarget = legalMoves.includes(square);
       clearSelection();
+
       if (!validTarget) {
         if (piece) {
           const mine = (myColor === "white" && piece.color === "w") || (myColor === "black" && piece.color === "b");
@@ -402,66 +625,100 @@
         renderBoard();
         return;
       }
+
       const ok = await postMove(from, square);
       renderBoard();
       if (!ok) return;
-      renderHistory(chess.history({ verbose: false }).map(String));
+
+      renderHistory((state.move_history || []).map(String));
       updateTurnStatus();
       await handleGameEnd();
     }
 
     async function loadState(force = false) {
-      if (!matchId) {
-        setStatus("Missing match_id.");
-        return;
+      if (stateRequestInFlight) {
+        pendingForceRefresh = pendingForceRefresh || force;
+        return stateRequestInFlight;
       }
-      const response = await fetch(`/chess_state?match_id=${encodeURIComponent(matchId)}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) {
-        setStatus("Could not load match.");
-        return;
+
+      stateRequestInFlight = (async () => {
+        if (!matchId) {
+          setStatus("Missing match_id.", "error");
+          return;
+        }
+
+        setSyncing(true);
+        const response = await fetch(`/chess_state?match_id=${encodeURIComponent(matchId)}&t=${Date.now()}`, {
+          cache: "no-store",
+          headers: {
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache",
+          },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          setStatus("Could not load match.", "error");
+          return;
+        }
+
+        state = payload;
+        if (!state.opponent_id) setStatus("Waiting for opponent to join.", "sync");
+
+        if (String(state.challenger_id) === userId) {
+          myColor = state.challenger_color || "white";
+        } else if (String(state.opponent_id) === userId) {
+          myColor = state.opponent_color || "black";
+        } else {
+          myColor = null;
+        }
+
+        document.getElementById("myColor").textContent = myColor ? myColor : "spectator";
+
+        if (!state.fen) state.fen = INITIAL_FEN;
+
+        if (force || state.fen !== lastFen) {
+          chess.load(state.fen);
+          lastFen = state.fen;
+          clearSelection();
+          renderBoard();
+        }
+
+        renderHistory((state.move_history || []).map(String));
+        updateTurnStatus();
+      })();
+
+      try {
+        await stateRequestInFlight;
+      } catch (_) {
+        setStatus("Sync failed. Tap Refresh.", "error");
+      } finally {
+        stateRequestInFlight = null;
+        setSyncing(false);
+        if (pendingForceRefresh) {
+          const shouldForce = pendingForceRefresh;
+          pendingForceRefresh = false;
+          void loadState(shouldForce);
+        }
       }
-      state = payload;
-      if (!state.opponent_id) {
-        setStatus("Waiting for opponent to join.");
-      }
-      if (String(state.challenger_id) === userId) {
-        myColor = state.challenger_color || "white";
-      } else if (String(state.opponent_id) === userId) {
-        myColor = state.opponent_color || "black";
-      } else {
-        myColor = null;
-      }
-      myColorEl.textContent = myColor ? myColor : "spectator";
-      if (!state.fen) {
-        state.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-      }
-      if (force || state.fen !== lastFen) {
-        chess.load(state.fen);
-        lastFen = state.fen;
-        clearSelection();
-        renderBoard();
-      }
-      renderHistory((state.move_history || []).map(String));
-      updateTurnStatus();
     }
 
-    document.getElementById("refreshBtn").addEventListener("click", () => loadState(true));
+    refreshBtn.addEventListener("click", () => {
+      void loadState(true);
+    });
+
     document.getElementById("resignBtn").addEventListener("click", async () => {
       if (!state || !myColor || finished) return;
       const ok = window.confirm("Resign this match?");
       if (!ok) return;
-      const winnerId = myColor === "white"
-        ? String(state.opponent_id)
-        : String(state.challenger_id);
+      const winnerId = myColor === "white" ? String(state.opponent_id) : String(state.challenger_id);
       await postResult(winnerId);
-      setStatus("You resigned.");
+      setStatus("You resigned.", "sync");
     });
 
-    loadState(true).then(() => {
+    void loadState(true).then(() => {
       pollTimer = setInterval(() => {
-        if (!finished) loadState(false);
-      }, 3000);
+        if (!finished) void loadState(false);
+      }, 1800);
     });
   </script>
 </body>

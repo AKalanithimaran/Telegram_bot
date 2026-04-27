@@ -291,6 +291,28 @@ async def chess_page(request: Request) -> FileResponse:
     return FileResponse(Path(__file__).with_name("chess.html"))
 
 
+async def _send_chess_result_messages(match_id: str, text: str, chat_ids: set[Any]) -> None:
+    if telegram_app is None:
+        return
+    for chat_id in chat_ids:
+        if not chat_id:
+            continue
+        try:
+            target_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            logger.warning("chess_result_notify_skipped_invalid_chat match_id=%s chat_id=%r", match_id, chat_id)
+            continue
+        try:
+            await telegram_app.bot.send_message(chat_id=target_chat_id, text=text)
+        except Exception as exc:
+            logger.warning(
+                "chess_result_notify_failed match_id=%s chat_id=%s error=%s",
+                match_id,
+                target_chat_id,
+                exc,
+            )
+
+
 async def chess_result(request: Request) -> JSONResponse:
     if telegram_app is None:
         return JSONResponse({"ok": False, "error": "bot_not_ready"}, status_code=503)
@@ -310,12 +332,11 @@ async def chess_result(request: Request) -> JSONResponse:
                 "Bets refunded to both players.",
             ]
         )
-        for chat_id in {match.get("chat_id"), match.get("challenger_id"), match.get("opponent_id")}:
-            if chat_id:
-                try:
-                    await telegram_app.bot.send_message(chat_id=int(chat_id), text=draw_text)
-                except Exception:
-                    pass
+        await _send_chess_result_messages(
+            match_id=match["_id"],
+            text=draw_text,
+            chat_ids={match.get("chat_id"), match.get("challenger_id"), match.get("opponent_id")},
+        )
         return JSONResponse({"ok": True, "result": "draw"})
     if winner_user_id not in {str(match["challenger_id"]), str(match["opponent_id"])}:
         return JSONResponse({"ok": False, "error": "invalid_winner"}, status_code=400)
@@ -330,12 +351,11 @@ async def chess_result(request: Request) -> JSONResponse:
             ANTI_CHEAT_WARNING,
         ]
     )
-    for chat_id in {settled.get("chat_id"), settled.get("challenger_id"), settled.get("opponent_id")}:
-        if chat_id:
-            try:
-                await telegram_app.bot.send_message(chat_id=int(chat_id), text=text)
-            except Exception:
-                pass
+    await _send_chess_result_messages(
+        match_id=settled["_id"],
+        text=text,
+        chat_ids={settled.get("chat_id"), settled.get("challenger_id"), settled.get("opponent_id")},
+    )
     return JSONResponse({"ok": True, "match_id": settled["_id"], "winner_user_id": winner_user_id})
 
 
@@ -355,7 +375,12 @@ async def chess_state(request: Request) -> JSONResponse:
             "opponent_color": match.get("opponent_color", "black"),
             "move_history": match.get("move_history", []),
             "status": match["status"],
-        }
+        },
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
