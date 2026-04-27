@@ -87,6 +87,24 @@ metrics: dict[str, Any] = {
 }
 
 
+async def ensure_webhook_consistency(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if settings.app_role != "web" or telegram_app is None:
+        return
+    try:
+        target = f"{settings.webhook_url}/webhook"
+        info = await telegram_app.bot.get_webhook_info()
+        if info.url != target:
+            await telegram_app.bot.set_webhook(
+                url=target,
+                allowed_updates=ALLOWED_UPDATES,
+                secret_token=settings.webhook_secret or None,
+                drop_pending_updates=False,
+            )
+            logger.warning("Webhook reconciled from %s to %s", info.url, target)
+    except Exception as exc:
+        logger.exception("ensure_webhook_consistency failed: %s", exc)
+
+
 async def _install_bot_send_limits(application: Application) -> None:
     semaphore = asyncio.Semaphore(settings.telegram_send_concurrency)
     set_telegram_send_semaphore(semaphore)
@@ -229,6 +247,8 @@ def build_telegram_application() -> Application:
         else:
             logger.info("TON polling disabled (app_env=%s sandbox=%s)", settings.app_env, settings.sandbox_mode)
         application.job_queue.run_repeating(game_expiry, interval=60, first=20, name="game_expiry")
+    elif settings.app_role == "web":
+        application.job_queue.run_repeating(ensure_webhook_consistency, interval=180, first=60, name="webhook_reconcile")
     return application
 
 
