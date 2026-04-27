@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from bson import ObjectId
+from motor.motor_asyncio import AsyncIOMotorClientSession
 from nanoid import generate
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from config import settings
-from db.mongo import get_db
+from db.mongo import get_db, mongo
 from utils import (
     get_cached_house,
     get_cached_settings,
@@ -19,6 +20,26 @@ from utils import (
 
 
 MATCH_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _is_vip(total_wagered: float) -> bool:
+    return float(total_wagered) >= float(settings.min_wager_threshold)
+
+
+async def _record_idempotency_key(key: str, payload: dict[str, Any], session: AsyncIOMotorClientSession) -> bool:
+    db = await get_db()
+    try:
+        await db.idempotency_keys.insert_one(
+            {
+                "_id": key,
+                "payload": payload,
+                "created_at": utcnow(),
+            },
+            session=session,
+        )
+        return True
+    except DuplicateKeyError:
+        return False
 
 
 async def ensure_user(user_id: int, username: str | None, first_name: str | None) -> dict[str, Any]:
@@ -130,6 +151,8 @@ async def add_transaction(
     address: str | None = None,
     admin_id: int | None = None,
     metadata: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+    session: AsyncIOMotorClientSession | None = None,
 ) -> Any:
     db = await get_db()
     doc = {
@@ -146,7 +169,9 @@ async def add_transaction(
     }
     if metadata:
         doc["metadata"] = metadata
-    return await db.transactions.insert_one(doc)
+    if idempotency_key:
+        doc["idempotency_key"] = idempotency_key
+    return await db.transactions.insert_one(doc, session=session)
 
 
 async def claim_ton_deposit(
@@ -157,31 +182,36 @@ async def claim_ton_deposit(
     tx_hash: str | None,
 ) -> bool:
     db = await get_db()
-    try:
-        await db.transactions.insert_one(
-            {
-                "user_id": str(user_id),
-                "type": "deposit",
-                "amount": float(amount),
-                "status": "completed",
-                "crypto": "TON",
-                "tx_hash": tx_hash,
-                "ton_lt": ton_lt,
-                "address": None,
-                "admin_id": None,
-                "created_at": utcnow(),
-            }
-        )
-    except DuplicateKeyError:
-        return False
-    await db.users.update_one(
-        {"_id": str(user_id)},
-        {"$inc": {"balance": float(amount)}, "$set": {"last_active": utcnow()}},
-    )
-    await db.house.update_one(
-        {"_id": "singleton"},
-        {"$inc": {"total_deposited": float(amount)}},
-    )
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            inserted = await _record_idempotency_key(
+                f"ton_deposit:{ton_lt}",
+                {"user_id": str(user_id), "amount": float(amount), "ton_lt": ton_lt},
+                session,
+            )
+            if not inserted:
+                return False
+            await add_transaction(
+                user_id,
+                "deposit",
+                amount,
+                "completed",
+                crypto="TON",
+                tx_hash=tx_hash,
+                ton_lt=ton_lt,
+                idempotency_key=f"ton_deposit:{ton_lt}",
+                session=session,
+            )
+            await db.users.update_one(
+                {"_id": str(user_id)},
+                {"$inc": {"balance": float(amount)}, "$set": {"last_active": utcnow()}},
+                session=session,
+            )
+            await db.house.update_one(
+                {"_id": "singleton"},
+                {"$inc": {"total_deposited": float(amount)}, "$set": {"updated_at": utcnow()}},
+                session=session,
+            )
     invalidate_house_cache()
     return True
 
@@ -241,11 +271,16 @@ async def refund_balance(user_id: int | str, amount: float) -> None:
 
 async def increment_wager_stats(user_id: int | str, amount: float) -> None:
     db = await get_db()
-    await db.users.update_one(
+    updated = await db.users.find_one_and_update(
         {"_id": str(user_id)},
         {"$inc": {"total_wagered": float(amount)}, "$set": {"last_active": utcnow()}},
+        return_document=ReturnDocument.AFTER,
     )
-    await sync_vip_status_for_user(user_id)
+    if updated:
+        await db.users.update_one(
+            {"_id": str(user_id)},
+            {"$set": {"is_vip": _is_vip(float(updated.get("total_wagered", 0.0)))}} ,
+        )
 
 
 async def record_game_result(
@@ -278,6 +313,484 @@ async def record_game_result(
             "$set": {"last_active": utcnow()},
         },
     )
+
+
+async def create_challenge_atomic(
+    user_id: int | str,
+    amount: float,
+    game: str,
+    mode: str | None,
+    dice_count: int | None,
+    chat_id: int | str,
+) -> dict[str, Any]:
+    db = await get_db()
+    match_id = generate(MATCH_ID_ALPHABET, 8)
+    payload: dict[str, Any] = {
+        "_id": match_id,
+        "game": game,
+        "mode": mode,
+        "dice_count": int(dice_count) if dice_count is not None else None,
+        "challenger_id": str(user_id),
+        "opponent_id": None,
+        "amount": float(amount),
+        "status": "pending",
+        "winner_id": None,
+        "challenger_result": None,
+        "opponent_result": None,
+        "chat_id": str(chat_id),
+        "message_id": 0,
+        "challenger_roll": None,
+        "opponent_roll": None,
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "turn": "white",
+        "challenger_color": "white",
+        "opponent_color": "black",
+        "move_history": [],
+        "created_at": utcnow(),
+        "completed_at": None,
+    }
+
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            if not settings.sandbox_mode:
+                updated_user = await db.users.find_one_and_update(
+                    {"_id": str(user_id), "balance": {"$gte": float(amount)}},
+                    {
+                        "$inc": {"balance": -float(amount), "total_wagered": float(amount)},
+                        "$set": {"last_active": utcnow()},
+                    },
+                    return_document=ReturnDocument.AFTER,
+                    session=session,
+                )
+                if not updated_user:
+                    raise ValueError("Insufficient balance.")
+                await db.users.update_one(
+                    {"_id": str(user_id)},
+                    {"$set": {"is_vip": _is_vip(float(updated_user.get("total_wagered", 0.0)))}},
+                    session=session,
+                )
+                await add_transaction(
+                    user_id,
+                    "game_loss",
+                    -float(amount),
+                    "pending",
+                    metadata={"stage": "escrow", "match_id": match_id},
+                    idempotency_key=f"challenge_create:{match_id}:{user_id}",
+                    session=session,
+                )
+            await db.matches.insert_one(payload, session=session)
+
+    match = await db.matches.find_one({"_id": match_id})
+    if not match:
+        raise RuntimeError("Failed to create match.")
+    return match
+
+
+async def claim_and_activate_match_atomic(match_id: str, opponent_id: int | str) -> dict[str, Any] | None:
+    db = await get_db()
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            claimed = await db.matches.find_one_and_update(
+                {"_id": match_id, "status": "pending", "opponent_id": None},
+                {"$set": {"status": "active", "opponent_id": str(opponent_id)}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if claimed is None:
+                return None
+            amount = float(claimed["amount"])
+            if settings.sandbox_mode:
+                return claimed
+
+            updated_user = await db.users.find_one_and_update(
+                {"_id": str(opponent_id), "balance": {"$gte": amount}},
+                {
+                    "$inc": {"balance": -amount, "total_wagered": amount},
+                    "$set": {"last_active": utcnow()},
+                },
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not updated_user:
+                raise ValueError("Insufficient balance.")
+
+            await db.users.update_one(
+                {"_id": str(opponent_id)},
+                {"$set": {"is_vip": _is_vip(float(updated_user.get("total_wagered", 0.0)))}},
+                session=session,
+            )
+            await add_transaction(
+                opponent_id,
+                "game_loss",
+                -amount,
+                "pending",
+                metadata={"stage": "escrow", "match_id": match_id},
+                idempotency_key=f"challenge_accept:{match_id}:{opponent_id}",
+                session=session,
+            )
+            return claimed
+
+
+async def settle_match_atomic(match_id: str, winner_id: str, payout: float, fee: float) -> dict[str, Any] | None:
+    db = await get_db()
+    key = f"match_settle:{match_id}"
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            inserted = await _record_idempotency_key(key, {"match_id": match_id, "winner_id": str(winner_id)}, session)
+            if not inserted:
+                return await db.matches.find_one({"_id": match_id}, session=session)
+
+            match = await db.matches.find_one(
+                {
+                    "_id": match_id,
+                    "status": {"$in": ["active", "disputed"]},
+                    "winner_id": None,
+                },
+                session=session,
+            )
+            if not match:
+                return await db.matches.find_one({"_id": match_id}, session=session)
+
+            loser_id = match["opponent_id"] if str(winner_id) == str(match["challenger_id"]) else match["challenger_id"]
+            amount = float(match["amount"])
+
+            if not settings.sandbox_mode:
+                await db.users.update_one(
+                    {"_id": str(winner_id)},
+                    {
+                        "$inc": {
+                            "balance": float(payout),
+                            "total_wins": 1,
+                            "games_played": 1,
+                            "total_profit": round(float(payout) - amount, 8),
+                        },
+                        "$set": {"last_active": utcnow()},
+                    },
+                    session=session,
+                )
+                await db.users.update_one(
+                    {"_id": str(loser_id)},
+                    {
+                        "$inc": {
+                            "total_losses": 1,
+                            "games_played": 1,
+                            "total_profit": -amount,
+                        },
+                        "$set": {"last_active": utcnow()},
+                    },
+                    session=session,
+                )
+                await db.house.update_one(
+                    {"_id": "singleton"},
+                    {
+                        "$inc": {"balance": float(fee), "total_fees_collected": float(fee)},
+                        "$set": {"updated_at": utcnow()},
+                    },
+                    session=session,
+                )
+
+            updated = await db.matches.find_one_and_update(
+                {"_id": match_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "winner_id": str(winner_id),
+                        "completed_at": utcnow(),
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            return updated
+
+
+async def cancel_match_and_refund_atomic(match_id: str) -> dict[str, Any] | None:
+    db = await get_db()
+    key = f"match_refund:{match_id}"
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            inserted = await _record_idempotency_key(key, {"match_id": match_id}, session)
+            if not inserted:
+                return await db.matches.find_one({"_id": match_id}, session=session)
+
+            match = await db.matches.find_one({"_id": match_id}, session=session)
+            if not match or match.get("status") == "completed":
+                return match
+
+            previous_status = str(match.get("status", ""))
+            updated = await db.matches.find_one_and_update(
+                {"_id": match_id, "status": {"$ne": "completed"}},
+                {"$set": {"status": "cancelled", "completed_at": utcnow()}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not updated:
+                return await db.matches.find_one({"_id": match_id}, session=session)
+
+            if not settings.sandbox_mode:
+                amount = float(match["amount"])
+                await db.users.update_one(
+                    {"_id": str(match["challenger_id"])},
+                    {"$inc": {"balance": amount}, "$set": {"last_active": utcnow()}},
+                    session=session,
+                )
+                if previous_status in {"active", "disputed"} and match.get("opponent_id"):
+                    await db.users.update_one(
+                        {"_id": str(match["opponent_id"])},
+                        {"$inc": {"balance": amount}, "$set": {"last_active": utcnow()}},
+                        session=session,
+                    )
+            return updated
+
+
+async def transfer_tip_atomic(
+    sender_id: int | str,
+    recipient_id: int | str,
+    amount: float,
+    *,
+    idempotency_key: str,
+) -> bool:
+    db = await get_db()
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            inserted = await _record_idempotency_key(
+                idempotency_key,
+                {
+                    "sender_id": str(sender_id),
+                    "recipient_id": str(recipient_id),
+                    "amount": float(amount),
+                },
+                session,
+            )
+            if not inserted:
+                return True
+
+            reserved = await db.users.find_one_and_update(
+                {"_id": str(sender_id), "balance": {"$gte": float(amount)}},
+                {"$inc": {"balance": -float(amount)}, "$set": {"last_active": utcnow()}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not reserved:
+                raise ValueError("Insufficient balance.")
+
+            await db.users.update_one(
+                {"_id": str(recipient_id)},
+                {"$inc": {"balance": float(amount)}, "$set": {"last_active": utcnow()}},
+                session=session,
+            )
+            await add_transaction(
+                sender_id,
+                "tip_sent",
+                -float(amount),
+                "completed",
+                metadata={"recipient_id": str(recipient_id)},
+                idempotency_key=f"{idempotency_key}:sender",
+                session=session,
+            )
+            await add_transaction(
+                recipient_id,
+                "tip_received",
+                float(amount),
+                "completed",
+                metadata={"sender_id": str(sender_id)},
+                idempotency_key=f"{idempotency_key}:recipient",
+                session=session,
+            )
+    return True
+
+
+async def create_pending_withdrawal_atomic(
+    user_id: int | str,
+    amount: float,
+    fee: float,
+    net_amount: float,
+    held_amount: float,
+    address: str,
+) -> tuple[str, float, float]:
+    db = await get_db()
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            reserved = await db.users.find_one_and_update(
+                {"_id": str(user_id), "balance": {"$gte": float(held_amount)}},
+                {"$inc": {"balance": -float(held_amount)}, "$set": {"last_active": utcnow()}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not reserved:
+                raise ValueError("Insufficient balance.")
+
+            doc = {
+                "user_id": str(user_id),
+                "amount": float(amount),
+                "fee": float(fee),
+                "net_amount": float(net_amount),
+                "held_amount": float(held_amount),
+                "crypto": "TON",
+                "address": address,
+                "status": "pending",
+                "admin_id": None,
+                "requested_at": utcnow(),
+                "resolved_at": None,
+            }
+            result = await db.pending_withdrawals.insert_one(doc, session=session)
+            withdrawal_id = str(result.inserted_id)
+            await add_transaction(
+                user_id,
+                "withdrawal",
+                -float(held_amount),
+                "pending",
+                crypto="TON",
+                address=address,
+                metadata={"withdrawal_id": withdrawal_id},
+                idempotency_key=f"withdrawal_request:{withdrawal_id}",
+                session=session,
+            )
+            return withdrawal_id, fee, net_amount
+
+
+async def resolve_withdrawal_atomic(
+    withdrawal_id: str,
+    *,
+    admin_id: int,
+    approve: bool,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    db = await get_db()
+    try:
+        _id = ObjectId(withdrawal_id)
+    except Exception:
+        return None
+    action = "approve" if approve else "reject"
+    key = f"withdrawal_resolve:{withdrawal_id}:{action}"
+    async with await mongo.client.start_session() as session:
+        async with session.start_transaction():
+            inserted = await _record_idempotency_key(key, {"withdrawal_id": withdrawal_id, "action": action}, session)
+            if not inserted:
+                return await db.pending_withdrawals.find_one({"_id": _id}, session=session)
+
+            updated = await db.pending_withdrawals.find_one_and_update(
+                {"_id": _id, "status": "pending"},
+                {
+                    "$set": {
+                        "status": "approved" if approve else "rejected",
+                        "resolved_at": utcnow(),
+                        "admin_id": str(admin_id),
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not updated:
+                return await db.pending_withdrawals.find_one({"_id": _id}, session=session)
+
+            if settings.sandbox_mode:
+                return updated
+
+            if approve:
+                fee = float(updated.get("fee", 0.0))
+                net_amount = float(updated.get("net_amount", 0.0))
+                await db.house.update_one(
+                    {"_id": "singleton"},
+                    {
+                        "$inc": {
+                            "balance": fee,
+                            "total_fees_collected": fee,
+                            "total_withdrawn": net_amount,
+                        },
+                        "$set": {"updated_at": utcnow()},
+                    },
+                    session=session,
+                )
+                await add_transaction(
+                    updated["user_id"],
+                    "withdrawal",
+                    -float(updated.get("held_amount", updated["amount"])),
+                    "completed",
+                    crypto=updated.get("crypto", "TON"),
+                    address=updated.get("address"),
+                    admin_id=admin_id,
+                    metadata={"withdrawal_id": str(updated["_id"])},
+                    idempotency_key=key,
+                    session=session,
+                )
+            else:
+                refund_amount = float(updated.get("held_amount", updated["amount"]))
+                await db.users.update_one(
+                    {"_id": str(updated["user_id"])},
+                    {"$inc": {"balance": refund_amount}, "$set": {"last_active": utcnow()}},
+                    session=session,
+                )
+                await add_transaction(
+                    updated["user_id"],
+                    "withdrawal",
+                    refund_amount,
+                    "rejected",
+                    crypto=updated.get("crypto", "TON"),
+                    address=updated.get("address"),
+                    admin_id=admin_id,
+                    metadata={"withdrawal_id": str(updated["_id"]), "reason": reason},
+                    idempotency_key=key,
+                    session=session,
+                )
+            return updated
+
+
+async def apply_chess_move_atomic(match_id: str, user_id: str, move: str, fen: str) -> tuple[dict[str, Any] | None, str | None]:
+    db = await get_db()
+    match = await db.matches.find_one({"_id": match_id})
+    if not match or match.get("game") != "chess" or match.get("status") != "active":
+        return None, "invalid_match"
+
+    turn = str(match.get("turn", "white"))
+    challenger_color = str(match.get("challenger_color", "white"))
+    expected_user = str(match["challenger_id"]) if turn == challenger_color else str(match["opponent_id"])
+    if str(user_id) != expected_user:
+        return None, "not_your_turn"
+
+    new_turn = "black" if turn == "white" else "white"
+    updated = await db.matches.find_one_and_update(
+        {
+            "_id": match_id,
+            "status": "active",
+            "game": "chess",
+            "turn": turn,
+        },
+        {
+            "$set": {"fen": fen, "turn": new_turn},
+            "$push": {"move_history": move},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        return None, "stale_turn"
+    return updated, None
+
+
+async def acquire_job_lock(job_name: str, owner_id: str, lease_seconds: int = 50) -> bool:
+    db = await get_db()
+    now = utcnow()
+    expires_at = now.timestamp() + max(5, int(lease_seconds))
+    result = await db.job_locks.find_one_and_update(
+        {
+            "_id": str(job_name),
+            "$or": [
+                {"expires_at": {"$lte": now.timestamp()}},
+                {"owner_id": owner_id},
+                {"owner_id": {"$exists": False}},
+            ],
+        },
+        {
+            "$set": {
+                "owner_id": owner_id,
+                "expires_at": expires_at,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return bool(result and result.get("owner_id") == owner_id)
 
 
 async def create_match(payload: dict[str, Any]) -> dict[str, Any]:

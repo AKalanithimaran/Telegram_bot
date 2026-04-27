@@ -9,6 +9,8 @@ Webhook-based Telegram gambling bot built with Python, `python-telegram-bot` 20.
 - TON auto-deposit polling every 30 seconds
 - Dice, football, chess, and MLBB wager flows
 - Admin moderation, balance tools, VIP leaderboard, and house accounting
+- Role-based runtime split with `APP_ROLE=web|worker`
+- Readiness endpoint: `GET /health/ready`
 
 ## Run Locally
 
@@ -22,6 +24,7 @@ python app.py
 ## Important Endpoints
 
 - `GET /health`
+- `GET /health/ready`
 - `POST /webhook`
 - `GET /chess?match_id=...&user_id=...`
 - `POST /chess_result`

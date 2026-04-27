@@ -13,6 +13,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await db.users.create_index("is_banned")
     await db.transactions.create_index("user_id")
     await db.transactions.create_index("ton_lt", unique=True, sparse=True)
+    await db.transactions.create_index("idempotency_key", unique=True, sparse=True)
     await db.transactions.create_index([("user_id", 1), ("created_at", -1)])
     await db.matches.create_index("status")
     await db.matches.create_index("challenger_id")
@@ -21,6 +22,8 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     await db.matches.create_index([("game", 1), ("status", 1), ("created_at", -1)])
     await db.pending_withdrawals.create_index("user_id")
     await db.pending_withdrawals.create_index("status")
+    await db.idempotency_keys.create_index("created_at")
+    await db.job_locks.create_index("expires_at")
 
 
 async def init_singletons(db: AsyncIOMotorDatabase) -> None:
@@ -70,9 +73,9 @@ class MongoManager:
             try:
                 client = AsyncIOMotorClient(
                     settings.mongo_uri,
-                    maxPoolSize=50,
-                    minPoolSize=5,
-                    maxIdleTimeMS=30000,
+                    maxPoolSize=200,
+                    minPoolSize=10,
+                    maxIdleTimeMS=60000,
                     serverSelectionTimeoutMS=5000,
                     connectTimeoutMS=5000,
                 )

@@ -25,9 +25,8 @@ from db.models import (
     set_settings_values,
     sync_vip_status_all,
     top_wagerers,
-    update_pending_withdrawal,
 )
-from utils import display_name, format_amount, utcnow, win_rate
+from utils import display_name, format_amount, win_rate
 
 AdminHandler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
@@ -123,16 +122,18 @@ async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAU
         await update.effective_message.reply_text("Usage: /approve_withdrawal <withdrawal_id>")
         return
     withdrawal = await get_pending_withdrawal(context.args[0])
-    if not withdrawal or withdrawal["status"] != "pending":
+    if not withdrawal:
         await update.effective_message.reply_text("Withdrawal not found or already resolved.")
         return
-    await update_pending_withdrawal(context.args[0], {"status": "approved", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)})
-    await approve_withdrawal_record(withdrawal, update.effective_user.id)
+    resolved = await approve_withdrawal_record(withdrawal, update.effective_user.id)
+    if not resolved or resolved.get("status") != "approved":
+        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        return
     await update.effective_message.reply_text(f"Approved withdrawal `{context.args[0]}`.")
     try:
         await context.bot.send_message(
-            chat_id=int(withdrawal["user_id"]),
-            text=f"Your withdrawal `{context.args[0]}` was approved. Net amount: {format_amount(float(withdrawal['net_amount']))} TON.",
+            chat_id=int(resolved["user_id"]),
+            text=f"Your withdrawal `{context.args[0]}` was approved. Net amount: {format_amount(float(resolved['net_amount']))} TON.",
         )
     except Exception:
         pass
@@ -149,15 +150,17 @@ async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAUL
         return
     reason = " ".join(context.args[1:]).strip() or None
     withdrawal = await get_pending_withdrawal(context.args[0])
-    if not withdrawal or withdrawal["status"] != "pending":
+    if not withdrawal:
         await update.effective_message.reply_text("Withdrawal not found or already resolved.")
         return
-    await update_pending_withdrawal(context.args[0], {"status": "rejected", "resolved_at": utcnow(), "admin_id": str(update.effective_user.id)})
-    await reject_withdrawal_record(withdrawal, update.effective_user.id, reason)
+    resolved = await reject_withdrawal_record(withdrawal, update.effective_user.id, reason)
+    if not resolved or resolved.get("status") != "rejected":
+        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        return
     await update.effective_message.reply_text(f"Rejected withdrawal `{context.args[0]}`.")
     try:
         await context.bot.send_message(
-            chat_id=int(withdrawal["user_id"]),
+            chat_id=int(resolved["user_id"]),
             text=f"Your withdrawal `{context.args[0]}` was rejected.{f' Reason: {reason}' if reason else ''}",
         )
     except Exception:

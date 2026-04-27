@@ -5,9 +5,7 @@ from datetime import timedelta
 from typing import Any
 
 from telegram import Update
-from telegram.constants import ChatType
 from telegram.ext import ContextTypes
-from pymongo import ReturnDocument
 
 from bot.keyboards import (
     challenge_card_keyboard,
@@ -20,21 +18,17 @@ from bot.keyboards import (
 )
 from config import settings
 from db.models import (
-    add_transaction,
-    create_match,
+    cancel_match_and_refund_atomic,
+    claim_and_activate_match_atomic,
+    create_challenge_atomic,
     fetch_pending_chess_matches,
     fetch_stale_manual_matches,
     get_match,
     get_user,
-    increment_wager_stats,
-    record_game_result,
-    refund_balance,
-    reserve_balance,
+    settle_match_atomic,
     update_match,
 )
-from db.mongo import get_db
-from services.house import add_house_fee
-from utils import ANTI_CHEAT_WARNING, display_name, format_amount, utcnow
+from utils import ANTI_CHEAT_WARNING, display_name, format_amount, is_rate_limited, utcnow
 
 
 def sandbox_note() -> str:
@@ -74,31 +68,13 @@ async def create_challenge(
     dice_count: int,
     chat_id: int,
 ) -> dict[str, Any]:
-    if not settings.sandbox_mode:
-        if not await reserve_balance(user["_id"], amount):
-            raise ValueError("Insufficient balance.")
-        await increment_wager_stats(user["_id"], amount)
-        await add_transaction(
-            user["_id"],
-            "game_loss",
-            -amount,
-            "pending",
-            metadata={"stage": "escrow"},
-        )
-    return await create_match(
-        {
-            "game": game,
-            "mode": mode,
-            "dice_count": int(dice_count),
-            "challenger_id": str(user["_id"]),
-            "opponent_id": None,
-            "amount": float(amount),
-            "status": "pending",
-            "winner_id": None,
-            "challenger_result": None,
-            "opponent_result": None,
-            "chat_id": str(chat_id),
-        }
+    return await create_challenge_atomic(
+        user_id=user["_id"],
+        amount=float(amount),
+        game=game,
+        mode=mode,
+        dice_count=dice_count,
+        chat_id=chat_id,
     )
 
 
@@ -133,28 +109,9 @@ async def post_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, mat
 
 
 async def claim_and_activate_match(match: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
-    db = await get_db()
-    claimed = await db.matches.find_one_and_update(
-        {"_id": match["_id"], "status": "pending"},
-        {"$set": {"status": "active", "opponent_id": str(user["_id"])}},
-        return_document=ReturnDocument.AFTER,
-    )
+    claimed = await claim_and_activate_match_atomic(match["_id"], user["_id"])
     if claimed is None:
         raise ValueError("Match already taken or unavailable.")
-    amount = float(claimed["amount"])
-    if not settings.sandbox_mode:
-        if not await reserve_balance(user["_id"], amount):
-            await update_match(claimed["_id"], {"status": "pending", "opponent_id": None})
-            raise ValueError("Insufficient balance.")
-        await increment_wager_stats(claimed["challenger_id"], amount)
-        await increment_wager_stats(user["_id"], amount)
-        await add_transaction(
-            user["_id"],
-            "game_loss",
-            -amount,
-            "pending",
-            metadata={"stage": "escrow", "match_id": claimed["_id"]},
-        )
     return claimed
 
 
@@ -173,23 +130,15 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
     if str(match["challenger_id"]) == str(opponent["_id"]):
         await query.answer("You cannot accept your own match.", show_alert=True)
         return
-    db = await get_db()
-    claimed = await db.matches.find_one_and_update(
-        {"_id": match_id, "status": "pending"},
-        {"$set": {"status": "active", "opponent_id": str(opponent["_id"])}},
-        return_document=ReturnDocument.AFTER,
-    )
+    try:
+        claimed = await claim_and_activate_match_atomic(match_id, opponent["_id"])
+    except ValueError:
+        await query.answer("Insufficient balance.", show_alert=True)
+        return
     if claimed is None:
         await query.answer("Match already taken.", show_alert=True)
         return
     amount = float(claimed["amount"])
-    if not settings.sandbox_mode:
-        if not await reserve_balance(opponent["_id"], amount):
-            await update_match(match_id, {"status": "pending", "opponent_id": None})
-            await query.answer("Insufficient balance.", show_alert=True)
-            return
-        await increment_wager_stats(claimed["challenger_id"], amount)
-        await increment_wager_stats(opponent["_id"], amount)
     challenger = await get_user(claimed["challenger_id"])
     lines = [
         "Match started.",
@@ -219,19 +168,15 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    if update.effective_user and is_rate_limited("user_cb", update.effective_user.id):
+        await query.answer("Too many actions. Please wait.", show_alert=True)
+        return
     _, match_id = (query.data or "").split(":", 1)
-    user_id = str(update.effective_user.id)
-    db = await get_db()
-    cancelled = await db.matches.find_one_and_update(
-        {"_id": match_id, "status": "pending", "challenger_id": user_id},
-        {"$set": {"status": "cancelled", "completed_at": utcnow()}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if cancelled is None:
+    match = await get_match(match_id)
+    if not match or str(match.get("challenger_id")) != str(update.effective_user.id) or match.get("status") != "pending":
         await query.answer("Only challenger can cancel pending match.", show_alert=True)
         return
-    if not settings.sandbox_mode:
-        await refund_balance(cancelled["challenger_id"], float(cancelled["amount"]))
+    await cancel_match_and_refund_atomic(match_id)
     text = "Challenge cancelled. Bet refunded."
     if settings.sandbox_mode:
         text = f"{text}\n{sandbox_note()}"
@@ -607,36 +552,17 @@ async def handle_mlbb_result_callback(update: Update, context: ContextTypes.DEFA
 
 
 async def settle_match(match: dict[str, Any], winner_id: str) -> tuple[dict[str, Any], float, float]:
-    loser_id = match["opponent_id"] if winner_id == match["challenger_id"] else match["challenger_id"]
     amount = float(match["amount"])
     payout = round(amount * 2 * 0.95, 8)
     fee = round(amount * 2 * 0.05, 8)
-    if not settings.sandbox_mode:
-        await record_game_result(winner_id, loser_id, amount, payout)
-        await add_house_fee(fee)
-    updated = await update_match(
-        match["_id"],
-        {
-            "status": "completed",
-            "winner_id": winner_id,
-            "completed_at": utcnow(),
-        },
-    )
+    updated = await settle_match_atomic(match["_id"], winner_id, payout, fee)
+    if not updated:
+        raise RuntimeError("Failed to settle match.")
     return updated, payout, fee
 
 
 async def cancel_match_and_refund(match: dict[str, Any]) -> None:
-    await update_match(
-        match["_id"],
-        {
-            "status": "cancelled",
-            "completed_at": utcnow(),
-        },
-    )
-    if not settings.sandbox_mode:
-        await refund_balance(match["challenger_id"], float(match["amount"]))
-        if match.get("opponent_id"):
-            await refund_balance(match["opponent_id"], float(match["amount"]))
+    await cancel_match_and_refund_atomic(match["_id"])
 
 
 async def roll_competitive_dice(
@@ -697,3 +623,15 @@ async def expire_old_games(application) -> None:
                 except Exception:
                     pass
     await mark_stale_mlbb_matches_disputed(application)
+    if update.effective_user and is_rate_limited("user_cb", update.effective_user.id):
+        await query.answer("Too many actions. Please wait.", show_alert=True)
+        return
+    if update.effective_user and is_rate_limited("user_cb", update.effective_user.id):
+        await query.answer("Too many actions. Please wait.", show_alert=True)
+        return
+    if update.effective_user and is_rate_limited("user_cb", update.effective_user.id):
+        await query.answer("Too many actions. Please wait.", show_alert=True)
+        return
+    if update.effective_user and is_rate_limited("user_cb", update.effective_user.id):
+        await query.answer("Too many actions. Please wait.", show_alert=True)
+        return

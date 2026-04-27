@@ -7,14 +7,14 @@ from config import settings
 from db.models import (
     add_balance,
     add_transaction,
-    create_pending_withdrawal,
+    create_pending_withdrawal_atomic,
     get_settings_doc,
     get_user,
-    refund_balance,
-    reserve_balance,
+    resolve_withdrawal_atomic,
+    transfer_tip_atomic,
 )
-from services.house import add_house_deposit, add_house_fee, add_house_withdrawal
-from utils import format_amount
+from services.house import add_house_deposit
+from utils import format_amount, utcnow
 
 
 async def credit_confirmed_deposit(
@@ -48,78 +48,47 @@ async def create_withdrawal_request(user_id: int, amount: float, address: str) -
     fee = round(amount * (fee_percent / 100), 8)
     net_amount = round(amount - fee, 8)
     held_amount = round(amount + fee, 8)
-    withdrawal_id = await create_pending_withdrawal(
-        {
-            "user_id": str(user_id),
-            "amount": float(amount),
-            "fee": fee,
-            "net_amount": net_amount,
-            "held_amount": held_amount,
-            "crypto": "TON",
-            "address": address,
-            "status": "pending",
-            "admin_id": None,
-        }
+    return await create_pending_withdrawal_atomic(
+        user_id=user_id,
+        amount=amount,
+        fee=fee,
+        net_amount=net_amount,
+        held_amount=held_amount,
+        address=address,
     )
-    await add_transaction(user_id, "withdrawal", -held_amount, "pending", crypto="TON", address=address)
-    return withdrawal_id, fee, net_amount
 
 
-async def approve_withdrawal_record(withdrawal: dict, admin_id: int) -> None:
-    if settings.sandbox_mode:
-        return
-    await add_house_fee(float(withdrawal["fee"]))
-    await add_house_withdrawal(float(withdrawal["net_amount"]))
-    await add_transaction(
-        withdrawal["user_id"],
-        "withdrawal",
-        -float(withdrawal.get("held_amount", withdrawal["amount"])),
-        "completed",
-        crypto=withdrawal.get("crypto", "TON"),
-        address=withdrawal.get("address"),
+async def approve_withdrawal_record(withdrawal: dict, admin_id: int) -> dict | None:
+    return await resolve_withdrawal_atomic(
+        str(withdrawal["_id"]),
         admin_id=admin_id,
-        metadata={"withdrawal_id": str(withdrawal["_id"])},
+        approve=True,
     )
 
 
-async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str | None) -> None:
-    if settings.sandbox_mode:
-        return
-    refund_amount = float(withdrawal.get("held_amount", withdrawal["amount"]))
-    await add_balance(
-        withdrawal["user_id"],
-        refund_amount,
-        reason="withdrawal_rejected",
-        tx_type="withdrawal",
+async def reject_withdrawal_record(withdrawal: dict, admin_id: int, reason: str | None) -> dict | None:
+    return await resolve_withdrawal_atomic(
+        str(withdrawal["_id"]),
         admin_id=admin_id,
-    )
-    await add_transaction(
-        withdrawal["user_id"],
-        "withdrawal",
-        refund_amount,
-        "rejected",
-        crypto=withdrawal.get("crypto", "TON"),
-        address=withdrawal.get("address"),
-        admin_id=admin_id,
-        metadata={"withdrawal_id": str(withdrawal["_id"]), "reason": reason},
+        approve=False,
+        reason=reason,
     )
 
 
-async def tip_users(sender_id: int, recipient_id: int | str, amount: float) -> None:
-    if settings.sandbox_mode:
-        return
-    await add_transaction(sender_id, "tip_sent", -amount, "completed", metadata={"recipient_id": str(recipient_id)})
-    await add_transaction(recipient_id, "tip_received", amount, "completed", metadata={"sender_id": str(sender_id)})
-
-
-async def transfer_tip(sender_id: int | str, recipient_id: int | str, amount: float) -> bool:
+async def transfer_tip(
+    sender_id: int | str,
+    recipient_id: int | str,
+    amount: float,
+    *,
+    idempotency_key: str | None = None,
+) -> bool:
     if settings.sandbox_mode:
         return True
-    if not await reserve_balance(sender_id, amount):
+    key = idempotency_key or f"tip_transfer:{sender_id}:{recipient_id}:{format_amount(amount)}:{utcnow().timestamp()}"
+    try:
+        return await transfer_tip_atomic(sender_id, recipient_id, amount, idempotency_key=key)
+    except ValueError:
         return False
-    await refund_balance(recipient_id, amount)
-    await tip_users(sender_id, recipient_id, amount)
-    return True
 
 
 async def describe_balance(user_id: int | str) -> str:

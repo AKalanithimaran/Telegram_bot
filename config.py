@@ -24,6 +24,17 @@ def _parse_bool(value: str, default: bool = False) -> bool:
     return normalized in {"1", "true", "yes", "on"}
 
 
+def _parse_int(value: str, default: int, minimum: int = 1) -> int:
+    raw = value.strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return default
+    return parsed if parsed >= minimum else minimum
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -43,6 +54,10 @@ class Settings:
     app_env: str
     ton_enabled: bool
     sandbox_mode: bool
+    app_role: str
+    max_update_concurrency: int
+    telegram_send_concurrency: int
+    rate_limit_per_user: int
 
 
 def load_settings() -> Settings:
@@ -50,6 +65,9 @@ def load_settings() -> Settings:
     app_env = os.getenv("APP_ENV", "production").strip().lower() or "production"
     ton_enabled = _parse_bool(os.getenv("ENABLE_TON", ""), default=(app_env != "development"))
     sandbox_mode = _parse_bool(os.getenv("ENABLE_SANDBOX", ""), default=(app_env == "development"))
+    app_role = os.getenv("APP_ROLE", "web").strip().lower() or "web"
+    if app_role not in {"web", "worker"}:
+        app_role = "web"
     return Settings(
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         mongo_uri=os.getenv("MONGO_URI", "").strip(),
@@ -68,6 +86,10 @@ def load_settings() -> Settings:
         app_env=app_env,
         ton_enabled=ton_enabled,
         sandbox_mode=sandbox_mode,
+        app_role=app_role,
+        max_update_concurrency=_parse_int(os.getenv("MAX_UPDATE_CONCURRENCY", ""), default=200, minimum=1),
+        telegram_send_concurrency=_parse_int(os.getenv("TELEGRAM_SEND_CONCURRENCY", ""), default=80, minimum=1),
+        rate_limit_per_user=_parse_int(os.getenv("RATE_LIMIT_PER_USER", ""), default=20, minimum=1),
     )
 
 

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from starlette.applications import Starlette
@@ -39,10 +43,25 @@ from bot.handlers import (
     withdraw_command,
 )
 from config import logger, settings
-from db.models import claim_ton_deposit, get_match, get_user
+from db.models import acquire_job_lock, apply_chess_move_atomic, claim_ton_deposit, get_match, get_user
 from db.mongo import mongo
-from services.ton import extract_amount, extract_comment, extract_ton_lt, extract_tx_hash, is_incoming, safe_fetch_recent_transactions
-from utils import ANTI_CHEAT_WARNING, display_name, format_amount
+from services.ton import (
+    close_ton_client,
+    extract_amount,
+    extract_comment,
+    extract_ton_lt,
+    extract_tx_hash,
+    init_ton_client,
+    is_incoming,
+    safe_fetch_recent_transactions,
+)
+from utils import (
+    ANTI_CHEAT_WARNING,
+    display_name,
+    format_amount,
+    limited_telegram_call,
+    set_telegram_send_semaphore,
+)
 
 ALLOWED_UPDATES = [
     "message",
@@ -57,6 +76,48 @@ ALLOWED_UPDATES = [
 ]
 
 telegram_app: Application | None = None
+update_semaphore: asyncio.Semaphore | None = None
+pending_update_tasks: set[asyncio.Task] = set()
+worker_id = f"{settings.app_role}:{uuid.uuid4().hex[:8]}"
+metrics: dict[str, Any] = {
+    "queued_updates": 0,
+    "processed_updates": 0,
+    "failed_updates": 0,
+    "last_update_ms": 0.0,
+}
+
+
+async def _install_bot_send_limits(application: Application) -> None:
+    semaphore = asyncio.Semaphore(settings.telegram_send_concurrency)
+    set_telegram_send_semaphore(semaphore)
+
+    for method_name in ("send_message", "edit_message_text", "send_dice"):
+        original = getattr(application.bot, method_name, None)
+        if original is None:
+            continue
+
+        async def _wrapper(*args, __orig=original, **kwargs):
+            return await limited_telegram_call(__orig, *args, **kwargs)
+
+        try:
+            setattr(application.bot, method_name, _wrapper)
+        except Exception as exc:
+            logger.warning("Could not wrap bot.%s for send limit: %s", method_name, exc)
+
+
+async def _process_update_queued(update: Update) -> None:
+    if telegram_app is None or update_semaphore is None:
+        return
+    started = time.perf_counter()
+    async with update_semaphore:
+        try:
+            await telegram_app.process_update(update)
+            metrics["processed_updates"] += 1
+        except Exception:
+            metrics["failed_updates"] += 1
+            logger.exception("update_processing_failed")
+        finally:
+            metrics["last_update_ms"] = round((time.perf_counter() - started) * 1000, 2)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -69,6 +130,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if settings.sandbox_mode or not settings.ton_enabled:
+            return
+        if not await acquire_job_lock("ton_poll", worker_id, lease_seconds=25):
             return
         transactions = await safe_fetch_recent_transactions(limit=20)
         if not transactions:
@@ -100,6 +163,8 @@ async def poll_ton_deposits(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def game_expiry(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
+        if not await acquire_job_lock("game_expiry", worker_id, lease_seconds=50):
+            return
         context.application.admin_ids = settings.admin_ids
         await expire_old_games(context.application)
     except Exception as exc:
@@ -158,19 +223,40 @@ def build_telegram_application() -> Application:
             "python-telegram-bot was installed without job-queue support. "
             "Install with: python-telegram-bot[job-queue]==20.8"
         )
-    if settings.ton_enabled and not settings.sandbox_mode:
-        application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=10, name="ton_poll")
-    else:
-        logger.info("TON polling disabled (app_env=%s sandbox=%s)", settings.app_env, settings.sandbox_mode)
-    application.job_queue.run_repeating(game_expiry, interval=60, first=30, name="game_expiry")
+    if settings.app_role == "worker":
+        if settings.ton_enabled and not settings.sandbox_mode:
+            application.job_queue.run_repeating(poll_ton_deposits, interval=30, first=5, name="ton_poll")
+        else:
+            logger.info("TON polling disabled (app_env=%s sandbox=%s)", settings.app_env, settings.sandbox_mode)
+        application.job_queue.run_repeating(game_expiry, interval=60, first=20, name="game_expiry")
     return application
 
 
 async def health(_: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "service": "telegram-gambling-bot"})
+    return JSONResponse({"ok": True, "service": "telegram-gambling-bot", "role": settings.app_role})
+
+
+async def ready(_: Request) -> JSONResponse:
+    db_ready = mongo.db is not None
+    app_ready = telegram_app is not None
+    ok = db_ready and app_ready
+    status = 200 if ok else 503
+    return JSONResponse(
+        {
+            "ok": ok,
+            "role": settings.app_role,
+            "db_ready": db_ready,
+            "bot_ready": app_ready,
+            "update_metrics": metrics,
+            "pending_tasks": len(pending_update_tasks),
+        },
+        status_code=status,
+    )
 
 
 async def webhook(request: Request) -> JSONResponse:
+    if settings.app_role != "web":
+        return JSONResponse({"ok": False, "error": "role_not_web"}, status_code=503)
     if telegram_app is None:
         return JSONResponse({"ok": False, "error": "bot_not_ready"}, status_code=503)
     if settings.webhook_secret:
@@ -179,7 +265,12 @@ async def webhook(request: Request) -> JSONResponse:
             return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
     payload = await request.json()
     update = Update.de_json(payload, telegram_app.bot)
-    await telegram_app.process_update(update)
+    if len(pending_update_tasks) >= settings.max_update_concurrency * 50:
+        return JSONResponse({"ok": False, "error": "overloaded"}, status_code=429)
+    metrics["queued_updates"] += 1
+    task = asyncio.create_task(_process_update_queued(update))
+    pending_update_tasks.add(task)
+    task.add_done_callback(lambda t: pending_update_tasks.discard(t))
     return JSONResponse({"ok": True})
 
 
@@ -260,61 +351,58 @@ async def chess_move(request: Request) -> JSONResponse:
     match_id = str(payload.get("match_id", "")).strip()
     user_id = str(payload.get("user_id", "")).strip()
     move = str(payload.get("move", "")).strip()
-    match = await get_match(match_id)
-    if not match or match["game"] != "chess" or match["status"] != "active":
-        return JSONResponse({"ok": False, "error": "invalid_match"}, status_code=400)
-    turn = match.get("turn", "white")
-    challenger_color = match.get("challenger_color", "white")
-    if turn == challenger_color:
-        expected_user = str(match["challenger_id"])
-    else:
-        expected_user = str(match["opponent_id"])
-    if user_id != expected_user:
-        return JSONResponse({"ok": False, "error": "not_your_turn"}, status_code=403)
-    history = list(match.get("move_history", []))
-    history.append(move)
-    new_turn = "black" if turn == "white" else "white"
     new_fen = str(payload.get("fen", "")).strip()
-    await update_match(
-        match_id,
-        {
-            "fen": new_fen,
-            "turn": new_turn,
-            "move_history": history,
-        },
-    )
-    return JSONResponse({"ok": True, "fen": new_fen, "turn": new_turn})
+    updated, error = await apply_chess_move_atomic(match_id, user_id, move, new_fen)
+    if error == "invalid_match":
+        return JSONResponse({"ok": False, "error": "invalid_match"}, status_code=400)
+    if error == "not_your_turn":
+        return JSONResponse({"ok": False, "error": "not_your_turn"}, status_code=403)
+    if error == "stale_turn":
+        return JSONResponse({"ok": False, "error": "stale_turn"}, status_code=409)
+    if not updated:
+        return JSONResponse({"ok": False, "error": "invalid_match"}, status_code=400)
+    return JSONResponse({"ok": True, "fen": updated.get("fen", new_fen), "turn": updated.get("turn", "white")})
 
 
 @asynccontextmanager
 async def lifespan(_: Starlette):
-    global telegram_app
+    global telegram_app, update_semaphore
     await mongo.connect()
+    await init_ton_client()
+    update_semaphore = asyncio.Semaphore(settings.max_update_concurrency)
     telegram_app = build_telegram_application()
     await telegram_app.initialize()
     await telegram_app.start()
+    await _install_bot_send_limits(telegram_app)
+
     webhook_target = f"{settings.webhook_url}/webhook"
-    try:
-        await telegram_app.bot.set_webhook(
-            url=webhook_target,
-            allowed_updates=ALLOWED_UPDATES,
-            secret_token=settings.webhook_secret or None,
-            drop_pending_updates=True,
-        )
-        logger.info("Webhook set → %s", webhook_target)
-    except Exception as exc:
-        logger.error("Failed to set webhook: %s", exc)
+    if settings.app_role == "web":
+        try:
+            await telegram_app.bot.set_webhook(
+                url=webhook_target,
+                allowed_updates=ALLOWED_UPDATES,
+                secret_token=settings.webhook_secret or None,
+                drop_pending_updates=True,
+            )
+            logger.info("Webhook set role=%s target=%s", settings.app_role, webhook_target)
+        except Exception as exc:
+            logger.error("Failed to set webhook: %s", exc)
+    else:
+        logger.info("Worker role active: webhook registration skipped")
+
     try:
         yield
     finally:
-        logger.info("Shutting down...")
+        logger.info("Shutting down role=%s...", settings.app_role)
         if telegram_app is not None:
-            try:
-                await telegram_app.bot.delete_webhook(drop_pending_updates=False)
-            except Exception:
-                pass
+            if settings.app_role == "web":
+                try:
+                    await telegram_app.bot.delete_webhook(drop_pending_updates=False)
+                except Exception:
+                    pass
             await telegram_app.stop()
             await telegram_app.shutdown()
+        await close_ton_client()
         await mongo.close()
 
 
@@ -323,6 +411,7 @@ starlette_app = Starlette(
     routes=[
         Route("/", health, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
+        Route("/health/ready", ready, methods=["GET"]),
         Route("/webhook", webhook, methods=["POST"]),
         Route("/chess", chess_page, methods=["GET"]),
         Route("/chess_state", chess_state, methods=["GET"]),

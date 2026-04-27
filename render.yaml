@@ -28,3 +28,47 @@ services:
         value: "8000"
       - key: WEBHOOK_SECRET
         sync: false
+      - key: APP_ROLE
+        value: web
+      - key: MAX_UPDATE_CONCURRENCY
+        value: "200"
+      - key: TELEGRAM_SEND_CONCURRENCY
+        value: "80"
+      - key: RATE_LIMIT_PER_USER
+        value: "20"
+  - type: worker
+    name: telegram-gambling-bot-worker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: TON_DEPOSIT_ADDRESS
+        sync: false
+      - key: TON_API_KEY
+        sync: false
+      - key: TONCENTER_API_URL
+        value: https://toncenter.com/api/v2
+      - key: WITHDRAWAL_FEE_PERCENT
+        value: "5.0"
+      - key: MIN_WAGER_THRESHOLD
+        value: "1000.0"
+      - key: PORT
+        value: "8000"
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: APP_ROLE
+        value: worker
+      - key: MAX_UPDATE_CONCURRENCY
+        value: "200"
+      - key: TELEGRAM_SEND_CONCURRENCY
+        value: "80"
+      - key: RATE_LIMIT_PER_USER
+        value: "20"

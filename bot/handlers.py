@@ -40,6 +40,7 @@ from utils import (
     is_private_chat,
     parse_user_reference,
     private_only_markup,
+    is_rate_limited,
     utcnow,
 )
 
@@ -54,6 +55,14 @@ def guard_handler(func: UserHandler) -> UserHandler:
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
+            user_id = update.effective_user.id if update.effective_user else None
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            if is_rate_limited("user_cmd", user_id):
+                if update.effective_message:
+                    await update.effective_message.reply_text("⏳ Too many requests. Please slow down a bit.")
+                return
+            if is_rate_limited("chat_cmd", chat_id):
+                return
             await func(update, context)
         except PermissionError as exc:
             if update.effective_message:
@@ -160,13 +169,12 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if float(user["balance"]) < total_cost:
         await update.effective_message.reply_text(f"Insufficient balance. Required: {format_amount(total_cost)} TON")
         return
-    from db.models import reserve_balance
     from bot.keyboards import withdrawal_admin_keyboard
-
-    if not await reserve_balance(user["_id"], total_cost):
-        await update.effective_message.reply_text("Balance changed before reservation. Try again.")
+    try:
+        withdrawal_id, _, net_amount = await create_withdrawal_request(update.effective_user.id, amount, context.args[1].strip())
+    except ValueError:
+        await update.effective_message.reply_text("Insufficient balance. Balance changed before reservation.")
         return
-    withdrawal_id, _, net_amount = await create_withdrawal_request(update.effective_user.id, amount, context.args[1].strip())
     await update.effective_message.reply_text(
         "\n".join(
             [
@@ -242,7 +250,8 @@ async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         return
-    if not await transfer_tip(user["_id"], recipient["_id"], amount):
+    tip_key = f"tip_transfer:{update.effective_chat.id}:{update.effective_message.message_id}:{user['_id']}:{recipient['_id']}"
+    if not await transfer_tip(user["_id"], recipient["_id"], amount, idempotency_key=tip_key):
         await update.effective_message.reply_text("Insufficient balance.")
         return
     await update.effective_message.reply_text(f"Sent {format_amount(amount)} TON to {display_name(recipient)}.")
@@ -383,7 +392,11 @@ async def accept_command(
         return
 
     # ── Atomic claim ─────────────────────────────────────────────────────────────
-    active_match = await claim_and_activate_match(match, user)
+    try:
+        active_match = await claim_and_activate_match(match, user)
+    except ValueError:
+        await update.effective_message.reply_text("❌ Match already taken or insufficient balance.")
+        return
     if not active_match:
         await update.effective_message.reply_text("❌ Match already taken. Try another.")
         return

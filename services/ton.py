@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -11,11 +12,40 @@ def ton_headers() -> dict[str, str]:
     return {"X-API-Key": settings.ton_api_key} if settings.ton_api_key else {}
 
 
+_ton_client: httpx.AsyncClient | None = None
+_ton_client_lock = asyncio.Lock()
+
+
+async def init_ton_client() -> None:
+    global _ton_client
+    if _ton_client is not None:
+        return
+    async with _ton_client_lock:
+        if _ton_client is None:
+            _ton_client = httpx.AsyncClient(timeout=settings.request_timeout, headers=ton_headers())
+
+
+async def close_ton_client() -> None:
+    global _ton_client
+    client = _ton_client
+    _ton_client = None
+    if client is not None:
+        await client.aclose()
+
+
+async def get_ton_client() -> httpx.AsyncClient:
+    if _ton_client is None:
+        await init_ton_client()
+    if _ton_client is None:
+        raise RuntimeError("TON client is not initialized.")
+    return _ton_client
+
+
 async def ton_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=settings.request_timeout, headers=ton_headers()) as client:
-        response = await client.get(f"{settings.toncenter_api_url}/{path.lstrip('/')}", params=params or {})
-        response.raise_for_status()
-        payload = response.json()
+    client = await get_ton_client()
+    response = await client.get(f"{settings.toncenter_api_url}/{path.lstrip('/')}", params=params or {})
+    response.raise_for_status()
+    payload = response.json()
     if not payload.get("ok", True):
         raise RuntimeError(payload.get("description") or "TonCenter request failed.")
     return payload.get("result")

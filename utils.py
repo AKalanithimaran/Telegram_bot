@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from collections import deque
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -18,6 +19,8 @@ _settings_cache: dict[str, Any] = {}
 _settings_cache_ts = 0.0
 _house_cache: dict[str, Any] = {}
 _house_cache_ts = 0.0
+_rate_limit_buckets: dict[str, deque[float]] = {}
+_telegram_send_semaphore = None
 
 
 def utcnow() -> datetime:
@@ -70,6 +73,39 @@ def parse_user_reference(raw: str) -> tuple[str, bool]:
 def win_rate(total_wins: int, total_losses: int) -> float:
     decided = total_wins + total_losses
     return round((total_wins / decided) * 100, 1) if decided else 0.0
+
+
+def is_rate_limited(scope: str, identifier: int | str | None, limit: int | None = None, window_seconds: float = 1.0) -> bool:
+    if identifier is None:
+        return False
+    cap = int(limit or settings.rate_limit_per_user)
+    if cap <= 0:
+        return False
+    now = time.monotonic()
+    key = f"{scope}:{identifier}"
+    bucket = _rate_limit_buckets.get(key)
+    if bucket is None:
+        bucket = deque()
+        _rate_limit_buckets[key] = bucket
+    cutoff = now - window_seconds
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= cap:
+        return True
+    bucket.append(now)
+    return False
+
+
+def set_telegram_send_semaphore(semaphore: Any) -> None:
+    global _telegram_send_semaphore
+    _telegram_send_semaphore = semaphore
+
+
+async def limited_telegram_call(func, *args, **kwargs):
+    if _telegram_send_semaphore is None:
+        return await func(*args, **kwargs)
+    async with _telegram_send_semaphore:
+        return await func(*args, **kwargs)
 
 
 async def get_cached_settings() -> dict[str, Any]:
