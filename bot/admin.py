@@ -39,7 +39,7 @@ def guard_admin(func: AdminHandler) -> AdminHandler:
         except Exception as exc:
             logger.exception("Admin handler %s failed: %s", func.__name__, exc)
             if update.effective_message:
-                await update.effective_message.reply_text("⚠️ Admin action failed.")
+                await update.effective_message.reply_text("⚠️ Admin action failed. Please try again.")
 
     return wrapper  # type: ignore[return-value]
 
@@ -50,17 +50,17 @@ def is_admin(user_id: int) -> bool:
 
 async def require_admin(update: Update) -> bool:
     if update.effective_chat.type != "private":
-        await update.effective_message.reply_text("Admin commands only work in private chat.")
+        await update.effective_message.reply_text("🔒 Admin commands only work in private chat.")
         return False
     if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("Unauthorized.")
+        await update.effective_message.reply_text("🚫 Unauthorized.")
         return False
     return True
 
 
 async def require_finance_enabled(update: Update) -> bool:
     if settings.sandbox_mode:
-        await update.effective_message.reply_text("This financial admin command is disabled in sandbox mode.")
+        await update.effective_message.reply_text("🧪 This financial admin command is disabled in sandbox mode.")
         return False
     return True
 
@@ -72,16 +72,18 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await require_finance_enabled(update):
         return
     if len(context.args) < 2:
-        await update.effective_message.reply_text("Usage: /add_balance <user_id> <amount> [reason]")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/add_balance <user_id> <amount> [reason]`\nExample: `/add_balance 123456 50 promo`"
+        )
         return
     user_id = context.args[0]
     amount = float(context.args[1])
     reason = " ".join(context.args[2:]).strip() or None
     user = await add_balance(user_id, amount, reason=reason, tx_type="admin_credit", admin_id=update.effective_user.id)
     if not user:
-        await update.effective_message.reply_text("User not found.")
+        await update.effective_message.reply_text("❌ User not found.")
         return
-    await update.effective_message.reply_text(f"Added {format_amount(amount)} TON to {display_name(user)}.")
+    await update.effective_message.reply_text(f"✅ Added {format_amount(amount)} TON to {display_name(user)}.")
     try:
         await context.bot.send_message(chat_id=int(user_id), text=f"Admin credited {format_amount(amount)} TON to your balance.")
     except Exception:
@@ -95,17 +97,19 @@ async def deduct_balance_command(update: Update, context: ContextTypes.DEFAULT_T
     if not await require_finance_enabled(update):
         return
     if len(context.args) < 2:
-        await update.effective_message.reply_text("Usage: /deduct_balance <user_id> <amount> [reason]")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/deduct_balance <user_id> <amount> [reason]`\nExample: `/deduct_balance 123456 10 penalty`"
+        )
         return
     user_id = context.args[0]
     amount = float(context.args[1])
     reason = " ".join(context.args[2:]).strip() or None
     user = await admin_force_deduct_balance(user_id, amount)
     if not user:
-        await update.effective_message.reply_text("User not found.")
+        await update.effective_message.reply_text("❌ User not found.")
         return
     await add_transaction(user_id, "admin_deduct", -amount, "completed", admin_id=update.effective_user.id, metadata={"reason": reason})
-    await update.effective_message.reply_text(f"Deducted {format_amount(amount)} TON from {display_name(user)}.")
+    await update.effective_message.reply_text(f"✅ Deducted {format_amount(amount)} TON from {display_name(user)}.")
     try:
         await context.bot.send_message(chat_id=int(user_id), text=f"Admin deducted {format_amount(amount)} TON from your balance.")
     except Exception:
@@ -119,17 +123,19 @@ async def approve_withdrawal_command(update: Update, context: ContextTypes.DEFAU
     if not await require_finance_enabled(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /approve_withdrawal <withdrawal_id>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/approve_withdrawal <withdrawal_id>`\nExample: `/approve_withdrawal wd_abc123`"
+        )
         return
     withdrawal = await get_pending_withdrawal(context.args[0])
     if not withdrawal:
-        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        await update.effective_message.reply_text("❌ Withdrawal not found or already resolved.")
         return
     resolved = await approve_withdrawal_record(withdrawal, update.effective_user.id)
     if not resolved or resolved.get("status") != "approved":
-        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        await update.effective_message.reply_text("❌ Withdrawal not found or already resolved.")
         return
-    await update.effective_message.reply_text(f"Approved withdrawal `{context.args[0]}`.")
+    await update.effective_message.reply_text(f"✅ Approved withdrawal `{context.args[0]}`.")
     try:
         await context.bot.send_message(
             chat_id=int(resolved["user_id"]),
@@ -146,18 +152,20 @@ async def reject_withdrawal_command(update: Update, context: ContextTypes.DEFAUL
     if not await require_finance_enabled(update):
         return
     if not context.args:
-        await update.effective_message.reply_text("Usage: /reject_withdrawal <withdrawal_id> [reason]")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/reject_withdrawal <withdrawal_id> [reason]`\nExample: `/reject_withdrawal wd_abc123 invalid address`"
+        )
         return
     reason = " ".join(context.args[1:]).strip() or None
     withdrawal = await get_pending_withdrawal(context.args[0])
     if not withdrawal:
-        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        await update.effective_message.reply_text("❌ Withdrawal not found or already resolved.")
         return
     resolved = await reject_withdrawal_record(withdrawal, update.effective_user.id, reason)
     if not resolved or resolved.get("status") != "rejected":
-        await update.effective_message.reply_text("Withdrawal not found or already resolved.")
+        await update.effective_message.reply_text("❌ Withdrawal not found or already resolved.")
         return
-    await update.effective_message.reply_text(f"Rejected withdrawal `{context.args[0]}`.")
+    await update.effective_message.reply_text(f"✅ Rejected withdrawal `{context.args[0]}`.")
     try:
         await context.bot.send_message(
             chat_id=int(resolved["user_id"]),
@@ -174,18 +182,20 @@ async def approve_deposit_command(update: Update, context: ContextTypes.DEFAULT_
     if not await require_finance_enabled(update):
         return
     if len(context.args) != 3:
-        await update.effective_message.reply_text("Usage: /approve_deposit <user_id> <amount> <crypto>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/approve_deposit <user_id> <amount> <crypto>`\nExample: `/approve_deposit 123456 20 TON`"
+        )
         return
     user_id, amount_raw, crypto = context.args
     amount = float(amount_raw)
     user = await add_balance(user_id, amount, reason=f"manual_{crypto.lower()}_deposit", tx_type="deposit", admin_id=update.effective_user.id)
     if not user:
-        await update.effective_message.reply_text("User not found.")
+        await update.effective_message.reply_text("❌ User not found.")
         return
     from services.house import add_house_deposit
 
     await add_house_deposit(amount)
-    await update.effective_message.reply_text(f"Credited {format_amount(amount)} {crypto} to {display_name(user)}.")
+    await update.effective_message.reply_text(f"✅ Credited {format_amount(amount)} {crypto} to {display_name(user)}.")
     try:
         await context.bot.send_message(chat_id=int(user_id), text=f"Your {crypto} deposit of {format_amount(amount)} has been approved.")
     except Exception:
@@ -197,18 +207,20 @@ async def resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await require_admin(update):
         return
     if len(context.args) != 2:
-        await update.effective_message.reply_text("Usage: /resolve <match_id> <winner_user_id>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/resolve <match_id> <winner_user_id>`\nExample: `/resolve ab12cd34 123456`"
+        )
         return
     match = await get_match(context.args[0])
     if not match or match["status"] not in {"active", "disputed"}:
-        await update.effective_message.reply_text("Match not found or not resolvable.")
+        await update.effective_message.reply_text("❌ Match not found or not resolvable.")
         return
     winner_id = context.args[1]
     if winner_id not in {str(match["challenger_id"]), str(match["opponent_id"])}:
-        await update.effective_message.reply_text("Winner must be one of the match players.")
+        await update.effective_message.reply_text("❌ Winner must be one of the match players.")
         return
     settled, payout, _ = await settle_match(match, winner_id)
-    await update.effective_message.reply_text(f"Resolved match `{settled['_id']}`. Winner payout: {format_amount(payout)} TON.")
+    await update.effective_message.reply_text(f"✅ Resolved match `{settled['_id']}`. Winner payout: {format_amount(payout)} TON.")
 
 
 @guard_admin
@@ -238,7 +250,7 @@ async def wager_report_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not await require_admin(update):
         return
     users = await top_wagerers(limit=10)
-    lines = ["Top 10 wagerers"]
+    lines = ["🏆 Top 10 wagerers"]
     for idx, user in enumerate(users, start=1):
         lines.append(
             f"{idx}. {display_name(user)} — wagered {format_amount(float(user['total_wagered']))} TON | games {user['games_played']} | win rate {win_rate(int(user['total_wins']), int(user['total_losses']))}%"
@@ -251,11 +263,11 @@ async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await require_admin(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /admin_user <user_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/admin_user <user_id>`\nExample: `/admin_user 123456`")
         return
     user = await get_user(context.args[0])
     if not user:
-        await update.effective_message.reply_text("User not found.")
+        await update.effective_message.reply_text("❌ User not found.")
         return
     transactions = await list_transactions_for_user(user["_id"], limit=5)
     matches = await list_matches_for_user(user["_id"], limit=5)
@@ -296,7 +308,7 @@ async def admin_ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not await require_admin(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /admin_ban <user_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/admin_ban <user_id>`\nExample: `/admin_ban 123456`")
         return
     user_id = context.args[0]
     from db.mongo import get_db
@@ -306,7 +318,7 @@ async def admin_ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     pending = await cancel_pending_matches_for_user(user_id)
     for match in pending:
         await cancel_match_and_refund(match)
-    await update.effective_message.reply_text(f"Banned {user_id}. Refunded {len(pending)} pending matches.")
+    await update.effective_message.reply_text(f"✅ Banned {user_id}. Refunded {len(pending)} pending matches.")
 
 
 @guard_admin
@@ -314,14 +326,14 @@ async def admin_unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await require_admin(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /admin_unban <user_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/admin_unban <user_id>`\nExample: `/admin_unban 123456`")
         return
     user_id = context.args[0]
     from db.mongo import get_db
 
     db = await get_db()
     await db.users.update_one({"_id": user_id}, {"$set": {"is_banned": False}})
-    await update.effective_message.reply_text(f"Unbanned {user_id}.")
+    await update.effective_message.reply_text(f"✅ Unbanned {user_id}.")
     try:
         await context.bot.send_message(chat_id=int(user_id), text="✅ Your account has been restored.")
     except Exception:
@@ -335,10 +347,10 @@ async def set_fee_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await require_finance_enabled(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /set_fee <percent>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/set_fee <percent>`\nExample: `/set_fee 5`")
         return
     updated = await set_settings_values({"withdrawal_fee_percent": float(context.args[0])})
-    await update.effective_message.reply_text(f"Withdrawal fee set to {updated['withdrawal_fee_percent']}%.")
+    await update.effective_message.reply_text(f"✅ Withdrawal fee set to {updated['withdrawal_fee_percent']}%.")
 
 
 @guard_admin
@@ -348,12 +360,12 @@ async def set_min_wager_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not await require_finance_enabled(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /set_min_wager <amount>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/set_min_wager <amount>`\nExample: `/set_min_wager 1000`")
         return
     amount = float(context.args[0])
     await set_settings_values({"min_wager_threshold": amount})
     await sync_vip_status_all()
-    await update.effective_message.reply_text(f"VIP threshold updated to {format_amount(amount)} TON.")
+    await update.effective_message.reply_text(f"✅ VIP threshold updated to {format_amount(amount)} TON.")
 
 
 @guard_admin
@@ -363,17 +375,19 @@ async def set_deposit_address_command(update: Update, context: ContextTypes.DEFA
     if not await require_finance_enabled(update):
         return
     if len(context.args) != 2:
-        await update.effective_message.reply_text("Usage: /set_deposit_address <TON|USDT_BEP20|SOL> <address>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/set_deposit_address <TON|USDT_BEP20|SOL> <address>`\nExample: `/set_deposit_address TON UQ...abc`"
+        )
         return
     crypto = context.args[0].upper()
     if crypto not in {"TON", "USDT_BEP20", "SOL"}:
-        await update.effective_message.reply_text("Crypto must be TON, USDT_BEP20, or SOL.")
+        await update.effective_message.reply_text("❌ Crypto must be TON, USDT_BEP20, or SOL.")
         return
     settings_doc = await get_settings_doc()
     deposit_addresses = dict(settings_doc.get("deposit_addresses", {}))
     deposit_addresses[crypto] = context.args[1]
     await set_settings_values({"deposit_addresses": deposit_addresses})
-    await update.effective_message.reply_text(f"Updated {crypto} deposit address.")
+    await update.effective_message.reply_text(f"✅ Updated {crypto} deposit address.")
 
 
 @guard_admin
@@ -381,14 +395,14 @@ async def admin_refund_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not await require_admin(update):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /admin_refund <match_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/admin_refund <match_id>`\nExample: `/admin_refund ab12cd34`")
         return
     match = await get_match(context.args[0])
     if not match or match["status"] == "completed":
-        await update.effective_message.reply_text("Match not found or already completed.")
+        await update.effective_message.reply_text("❌ Match not found or already completed.")
         return
     await cancel_match_and_refund(match)
-    await update.effective_message.reply_text(f"Refunded match `{context.args[0]}`.")
+    await update.effective_message.reply_text(f"✅ Refunded match `{context.args[0]}`.")
 
 
 @guard_admin

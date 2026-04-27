@@ -21,6 +21,15 @@ pip install -r requirements.txt
 python app.py
 ```
 
+## GIF Configuration (Dice / Football)
+
+Add these optional environment variables to send Telegram GIF animations:
+
+- `DICE_GIF_FILE_ID`
+- `FOOTBALL_GIF_FILE_ID`
+
+If unset, the bot continues normal gameplay without GIF messages.
+
 ## Important Endpoints
 
 - `GET /health`

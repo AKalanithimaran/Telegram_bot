@@ -58,6 +58,8 @@ class Settings:
     max_update_concurrency: int
     telegram_send_concurrency: int
     rate_limit_per_user: int
+    dice_gif_file_id: str
+    football_gif_file_id: str
 
 
 def load_settings() -> Settings:
@@ -90,6 +92,8 @@ def load_settings() -> Settings:
         max_update_concurrency=_parse_int(os.getenv("MAX_UPDATE_CONCURRENCY", ""), default=200, minimum=1),
         telegram_send_concurrency=_parse_int(os.getenv("TELEGRAM_SEND_CONCURRENCY", ""), default=80, minimum=1),
         rate_limit_per_user=_parse_int(os.getenv("RATE_LIMIT_PER_USER", ""), default=20, minimum=1),
+        dice_gif_file_id=os.getenv("DICE_GIF_FILE_ID", "").strip(),
+        football_gif_file_id=os.getenv("FOOTBALL_GIF_FILE_ID", "").strip(),
     )
 
 

@@ -189,15 +189,22 @@ def build_telegram_application() -> Application:
     user_handlers = [
         ("start", start_command),
         ("deposit", deposit_command),
+        ("fund", deposit_command),
         ("withdraw", withdraw_command),
+        ("cashout", withdraw_command),
         ("balance", balance_command),
+        ("wallet", balance_command),
         ("tip", tip_command),
         ("challenge", challenge_command),
+        ("play", challenge_command),
         ("accept", accept_command),
         ("result", result_command),
         ("profile", profile_command),
+        ("me", profile_command),
         ("history", history_command),
+        ("logs", history_command),
         ("leaderboard", leaderboard_command),
+        ("top", leaderboard_command),
         ("setmlbb", setmlbb_command),
     ]
     admin_command_map = [

@@ -94,7 +94,7 @@ async def transfer_tip(
 async def describe_balance(user_id: int | str) -> str:
     user = await get_user(user_id)
     balance = float(user["balance"]) if user else 0.0
-    return f"Current balance: {format_amount(balance)} TON"
+    return f"💰 Current balance: {format_amount(balance)} TON"
 
 
 async def notify_deposit_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, crypto: str) -> None:
@@ -102,12 +102,12 @@ async def notify_deposit_prompt(update: Update, context: ContextTypes.DEFAULT_TY
     deposit_addresses = settings_doc.get("deposit_addresses", {})
     address = deposit_addresses.get(crypto, "")
     lines = [
-        f"{crypto} deposit instructions",
-        f"Address: {address or 'Not configured'}",
-        f"Memo/comment: your Telegram user ID `{update.effective_user.id}`",
+        f"💳 {crypto} Deposit Instructions",
+        f"📍 Address: {address or 'Not configured'}",
+        f"🆔 Memo/comment: your Telegram user ID `{update.effective_user.id}`",
     ]
     if crypto == "TON":
-        lines.append("TON is auto-detected every 30 seconds via TonCenter.")
+        lines.append("🤖 TON is auto-detected every 30 seconds via TonCenter.")
     else:
-        lines.append("After sending, reply in private with your tx hash so admins can review it manually.")
+        lines.append("📨 After sending, reply in private with your tx hash so admins can review it manually.")
     await update.effective_message.reply_text("\n".join(lines))

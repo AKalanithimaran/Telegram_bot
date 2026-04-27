@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from functools import wraps
 from typing import Any, Awaitable, Callable
 
@@ -42,13 +43,94 @@ from utils import (
     private_only_markup,
     is_rate_limited,
     utcnow,
+    win_rate,
 )
 
 UserHandler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
 def sandbox_note() -> str:
-    return "Sandbox mode: TON economy is disabled."
+    return "🧪 Sandbox mode: TON economy is disabled."
+
+
+PROFILE_TIERS: list[dict[str, Any]] = [
+    {"name": "Apprentice", "min": 0.0, "daily": 0.05, "weekly": 0.02, "monthly": 0.03},
+    {"name": "Contender", "min": 250.0, "daily": 0.08, "weekly": 0.03, "monthly": 0.05},
+    {"name": "Hustler", "min": 1000.0, "daily": 0.12, "weekly": 0.05, "monthly": 0.08},
+    {"name": "High Roller", "min": 5000.0, "daily": 0.18, "weekly": 0.075, "monthly": 0.1},
+    {"name": "Legend", "min": 20000.0, "daily": 0.24, "weekly": 0.09, "monthly": 0.125},
+]
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _progress_bar(percent: float, width: int = 16) -> str:
+    clamped = max(0.0, min(100.0, percent))
+    filled = round((clamped / 100.0) * width)
+    return f"{'█' * filled}{'░' * (width - filled)}"
+
+
+def _format_joined(user: dict[str, Any]) -> str:
+    joined = user.get("joined_at")
+    if isinstance(joined, datetime):
+        return joined.strftime("%d %b %Y")
+    return "Unknown"
+
+
+def _profile_tier_info(total_wagered: float) -> tuple[dict[str, Any], dict[str, Any] | None, float]:
+    current = PROFILE_TIERS[0]
+    next_tier: dict[str, Any] | None = None
+    for idx, tier in enumerate(PROFILE_TIERS):
+        if total_wagered >= float(tier["min"]):
+            current = tier
+            if idx + 1 < len(PROFILE_TIERS):
+                next_tier = PROFILE_TIERS[idx + 1]
+        else:
+            break
+    if not next_tier:
+        return current, None, 100.0
+    span = float(next_tier["min"]) - float(current["min"])
+    done = max(0.0, total_wagered - float(current["min"]))
+    percent = 100.0 if span <= 0 else (done / span) * 100.0
+    return current, next_tier, max(0.0, min(100.0, percent))
+
+
+def _profile_card(user: dict[str, Any]) -> str:
+    total_wagered = _as_float(user.get("total_wagered"))
+    total_wins = int(user.get("total_wins") or 0)
+    total_losses = int(user.get("total_losses") or 0)
+    games_played = int(user.get("games_played") or 0)
+    win_pct = win_rate(total_wins, total_losses)
+    current, next_tier, progress = _profile_tier_info(total_wagered)
+    next_need = 0.0 if not next_tier else max(0.0, float(next_tier["min"]) - total_wagered)
+    joined = _format_joined(user)
+    username = user.get("username")
+    handle = f"@{username}" if username else "No username"
+    tier_line = f"{current['name']}" if not next_tier else f"{current['name']} ➜ {next_tier['name']}"
+    bar = _progress_bar(progress)
+    lines = [
+        "🪪 Profile",
+        f"👤 {display_name(user)} · {handle}",
+        f"🆔 `{user['_id']}` · 📅 {joined}",
+        "",
+        f"💰 Balance: {format_amount(_as_float(user.get('balance')))} TON",
+        f"🏅 Level: {tier_line}",
+        f"📈 Wagered: {format_amount(total_wagered)} TON",
+        f"📊 Progress: {bar} {round(progress, 1)}%",
+        f"🎁 Perks: D {current['daily']}% · W {current['weekly']}% · M {current['monthly']}%",
+        f"🎮 Games: {games_played} · 🏆 Win rate: {win_pct}%",
+        f"📉 P/L: {format_amount(_as_float(user.get('total_profit')))} TON",
+        f"👑 VIP: {'Yes' if user.get('is_vip') else 'No'} · ⚔️ MLBB: {user.get('mlbb_id') or 'Not set'}",
+    ]
+    lines.append(
+        f"🚀 Next tier in {format_amount(next_need)} TON" if next_tier else "🚀 Max tier reached"
+    )
+    return "\n".join(lines)
 
 
 def guard_handler(func: UserHandler) -> UserHandler:
@@ -107,15 +189,15 @@ def format_leaderboard(rows: list[dict[str, Any]]) -> str:
 @guard_handler
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
-    is_admin_user = update.effective_user.id in settings.admin_ids
     await update.effective_message.reply_text(
         "\n".join(
             [
-                f"Welcome, {display_name(user)}",
-                "Use the menu below to access balance, games, deposits, withdrawals, history, and leaderboard.",
+                f"✨ Welcome back, {display_name(user)}",
+                "Use the menu below to manage wallet, games, and profile.",
+                "Quick: /play /wallet /me /logs /top /fund /cashout",
             ]
         ),
-        reply_markup=main_menu_keyboard(is_admin=is_admin_user),
+        reply_markup=main_menu_keyboard(user_id=update.effective_user.id if update.effective_user else None),
     )
 
 
@@ -125,15 +207,13 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await require_private(update, context):
         return
     if settings.sandbox_mode:
-        await update.effective_message.reply_text("Deposit is disabled in sandbox mode.")
+        await update.effective_message.reply_text("🧪 Deposits are disabled in sandbox mode.")
         return
     if not settings.ton_enabled:
-        await update.effective_message.reply_text(
-            "TON deposit logic is temporarily disabled in development mode."
-        )
+        await update.effective_message.reply_text("⚠️ TON deposit logic is temporarily disabled in development mode.")
         return
     await update.effective_message.reply_text(
-        "Choose a deposit method. Include your Telegram user ID as memo/comment.",
+        "💳 Choose a deposit method.\nInclude your Telegram user ID as memo/comment.",
         reply_markup=deposit_keyboard(),
     )
 
@@ -144,44 +224,44 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await require_private(update, context):
         return
     if settings.sandbox_mode:
-        await update.effective_message.reply_text("Withdrawal is disabled in sandbox mode.")
+        await update.effective_message.reply_text("🧪 Withdrawals are disabled in sandbox mode.")
         return
     if not settings.ton_enabled:
-        await update.effective_message.reply_text(
-            "TON withdrawal logic is temporarily disabled in development mode."
-        )
+        await update.effective_message.reply_text("⚠️ TON withdrawal logic is temporarily disabled in development mode.")
         return
     if len(context.args) != 2:
-        await update.effective_message.reply_text("Usage: /withdraw <amount> <address>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/cashout <amount> <address>`\nExample: `/cashout 10 UQ...abc`"
+        )
         return
     try:
         amount = round(float(context.args[0]), 8)
     except ValueError:
-        await update.effective_message.reply_text("Amount must be numeric.")
+        await update.effective_message.reply_text("❌ Amount must be numeric.")
         return
     if amount <= 0:
-        await update.effective_message.reply_text("Amount must be greater than zero.")
+        await update.effective_message.reply_text("❌ Amount must be greater than zero.")
         return
     settings_doc = await get_settings_doc()
     fee_percent = float(settings_doc.get("withdrawal_fee_percent", settings.withdrawal_fee_percent))
     fee = round(amount * (fee_percent / 100), 8)
     total_cost = round(amount + fee, 8)
     if float(user["balance"]) < total_cost:
-        await update.effective_message.reply_text(f"Insufficient balance. Required: {format_amount(total_cost)} TON")
+        await update.effective_message.reply_text(f"❌ Insufficient balance. Required: {format_amount(total_cost)} TON")
         return
     from bot.keyboards import withdrawal_admin_keyboard
     try:
         withdrawal_id, _, net_amount = await create_withdrawal_request(update.effective_user.id, amount, context.args[1].strip())
     except ValueError:
-        await update.effective_message.reply_text("Insufficient balance. Balance changed before reservation.")
+        await update.effective_message.reply_text("❌ Insufficient balance. Balance changed before reservation.")
         return
     await update.effective_message.reply_text(
         "\n".join(
             [
-                f"Withdrawal request created: `{withdrawal_id}`",
-                f"Gross: {format_amount(amount)} TON",
-                f"Net: {format_amount(net_amount)} TON",
-                "Admins have been notified.",
+                f"✅ Withdrawal request created: `{withdrawal_id}`",
+                f"💸 Gross: {format_amount(amount)} TON",
+                f"💰 Net: {format_amount(net_amount)} TON",
+                "📨 Admins have been notified.",
             ]
         )
     )
@@ -190,11 +270,11 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"New withdrawal request\n"
+                    f"⚠️ New withdrawal request\n"
                     f"ID: `{withdrawal_id}`\n"
-                    f"User: {display_name(user)} ({user['_id']})\n"
+                    f"User: {display_name(user)} (`{user['_id']}`)\n"
                     f"Amount: {format_amount(amount)} TON\n"
-                    f"Address: {context.args[1].strip()}"
+                    f"Address: `{context.args[1].strip()}`"
                 ),
                 reply_markup=withdrawal_admin_keyboard(withdrawal_id),
             )
@@ -217,27 +297,29 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
     if len(context.args) != 2:
-        await update.effective_message.reply_text("Usage: /tip <@username|user_id> <amount>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/tip <@username|user_id> <amount>`\nExample: `/tip @rahul 2`"
+        )
         return
     target_raw, is_username = parse_user_reference(context.args[0])
     try:
         amount = round(float(context.args[1]), 8)
     except ValueError:
-        await update.effective_message.reply_text("Amount must be numeric.")
+        await update.effective_message.reply_text("❌ Amount must be numeric.")
         return
     if amount < 0.1:
-        await update.effective_message.reply_text("Minimum tip is 0.1 TON.")
+        await update.effective_message.reply_text("❌ Minimum tip is 0.1 TON.")
         return
     recipient = await get_user_by_username(target_raw) if is_username else await get_user(target_raw)
     if not recipient or recipient.get("is_banned"):
-        await update.effective_message.reply_text("Recipient is unavailable.")
+        await update.effective_message.reply_text("❌ Recipient is unavailable.")
         return
     if str(recipient["_id"]) == str(user["_id"]):
-        await update.effective_message.reply_text("You cannot tip yourself.")
+        await update.effective_message.reply_text("❌ You cannot tip yourself.")
         return
     if settings.sandbox_mode:
         await update.effective_message.reply_text(
-            f"Sent {format_amount(amount)} TON to {display_name(recipient)}.\n{sandbox_note()}"
+            f"✅ Sent {format_amount(amount)} TON to {display_name(recipient)}.\n{sandbox_note()}"
         )
         try:
             await context.bot.send_message(
@@ -252,9 +334,9 @@ async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     tip_key = f"tip_transfer:{update.effective_chat.id}:{update.effective_message.message_id}:{user['_id']}:{recipient['_id']}"
     if not await transfer_tip(user["_id"], recipient["_id"], amount, idempotency_key=tip_key):
-        await update.effective_message.reply_text("Insufficient balance.")
+        await update.effective_message.reply_text("❌ Insufficient balance.")
         return
-    await update.effective_message.reply_text(f"Sent {format_amount(amount)} TON to {display_name(recipient)}.")
+    await update.effective_message.reply_text(f"✅ Sent {format_amount(amount)} TON to {display_name(recipient)}.")
     try:
         await context.bot.send_message(
             chat_id=int(recipient["_id"]),
@@ -271,11 +353,8 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # ── Usage hint ──────────────────────────────────────────────────────────────
     if not args or len(args) < 2:
         await update.effective_message.reply_text(
-            "Usage:\n"
-            "/challenge <amount> dice [normal|crazy] [1|2|3]\n"
-            "/challenge <amount> football [normal|crazy] [1|2|3]\n"
-            "/challenge <amount> chess\n"
-            "/challenge <amount> mlbb"
+            "ℹ️ Usage: `/play <amount> <game> [mode] [count]`\n"
+            "Example: `/play 10 dice normal 2`"
         )
         return
 
@@ -292,8 +371,7 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     game = args[1].strip().lower()
     if game not in {"dice", "football", "chess", "mlbb"}:
         await update.effective_message.reply_text(
-            "❌ Invalid game.\n"
-            "Choose from: dice, football, chess, mlbb"
+            "❌ Invalid game.\nChoose from: dice, football, chess, mlbb"
         )
         return
 
@@ -307,8 +385,8 @@ async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if parsed_mode not in {"normal", "crazy"}:
                 await update.effective_message.reply_text(
                     f"❌ Invalid mode '{parsed_mode}'.\n"
-                    f"Use: normal or crazy\n"
-                    f"Example: /challenge {format_amount(amount)} {game} normal 2"
+                    "Use: normal or crazy.\n"
+                    f"Example: `/play {format_amount(amount)} {game} normal 2`"
                 )
                 return
             mode = parsed_mode
@@ -382,7 +460,7 @@ async def accept_command(
     target_match_id = match_id or (context.args[0] if context.args else "")
 
     if not target_match_id:
-        await update.effective_message.reply_text("Usage: /accept <match_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/accept <match_id>`\nExample: `/accept ab12cd34`")
         return
 
     match = await get_match(target_match_id)
@@ -431,16 +509,18 @@ async def accept_command(
 async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
     if len(context.args) != 2:
-        await update.effective_message.reply_text("Usage: /result <match_id> <win|lose>")
+        await update.effective_message.reply_text(
+            "ℹ️ Usage: `/result <match_id> <win|lose>`\nExample: `/result ab12cd34 win`"
+        )
         return
     match_id = context.args[0]
     result = context.args[1].lower()
     if result not in {"win", "lose"}:
-        await update.effective_message.reply_text("Result must be win or lose.")
+        await update.effective_message.reply_text("❌ Result must be `win` or `lose`.")
         return
     match = await get_active_mlbb_match_for_user(user["_id"], match_id)
     if not match:
-        await update.effective_message.reply_text("No active MLBB match found.")
+        await update.effective_message.reply_text("❌ No active MLBB match found.")
         return
 
     # Determine which field to update
@@ -454,7 +534,7 @@ async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     match = await update_match(match_id, {field: result})
     if not match:
-        await update.effective_message.reply_text("Failed to update result.")
+        await update.effective_message.reply_text("❌ Failed to update result.")
         return
 
     # Wait for both
@@ -469,16 +549,23 @@ async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Conflict: both claim win or both claim lose
     if c_result == o_result:
         await update_match(match_id, {"status": "disputed"})
+        challenger = await get_user(match["challenger_id"])
+        opponent = await get_user(match["opponent_id"])
+        admin_text = (
+            f"⚠️ Disputed MLBB match `{match_id}`\n\n"
+            f"Challenger: {display_name(challenger)}\n"
+            f"- Telegram ID: `{match['challenger_id']}`\n"
+            f"- MLBB ID: `{(challenger or {}).get('mlbb_id') or 'Not set'}`\n"
+            f"- Submitted: `{c_result}`\n\n"
+            f"Opponent: {display_name(opponent)}\n"
+            f"- Telegram ID: `{match['opponent_id']}`\n"
+            f"- MLBB ID: `{(opponent or {}).get('mlbb_id') or 'Not set'}`\n"
+            f"- Submitted: `{o_result}`\n\n"
+            f"Resolve with: /resolve {match_id} <winner_user_id>"
+        )
         for admin_id in settings.admin_ids:
             try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"⚠️ Disputed MLBB match `{match_id}`\n"
-                        f"Both players reported the same result.\n"
-                        f"Resolve with: /resolve {match_id} <winner_user_id>"
-                    ),
-                )
+                await context.bot.send_message(chat_id=admin_id, text=admin_text)
             except Exception:
                 pass
         await update.effective_message.reply_text(
@@ -506,20 +593,10 @@ async def result_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @guard_handler
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = await ensure_current_user(update)
-    lines = [
-        f"👤 {display_name(user)}",
-        f"ID: {user['_id']}",
-        f"Balance: {format_amount(float(user['balance']))} TON",
-        f"Total wagered: {format_amount(float(user['total_wagered']))} TON",
-        f"Wins: {user['total_wins']} | Losses: {user['total_losses']}",
-        f"Profit/Loss: {format_amount(float(user['total_profit']))} TON",
-        f"Games played: {user['games_played']}",
-        f"VIP: {'Yes 👑' if user.get('is_vip') else 'No'}",
-        f"MLBB ID: {user.get('mlbb_id') or 'Not set'}",
-    ]
+    text = _profile_card(user)
     if settings.sandbox_mode:
-        lines.append(sandbox_note())
-    await update.effective_message.reply_text("\n".join(lines))
+        text = f"{text}\n{sandbox_note()}"
+    await update.effective_message.reply_text(text)
 
 
 @guard_handler
@@ -541,9 +618,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         or ["No matches yet."]
     )
     text = (
-        "Last 10 transactions\n"
+        "📜 Last 10 transactions\n"
         + "\n".join(tx_lines)
-        + "\n\nLast 10 matches\n"
+        + "\n\n🎯 Last 10 matches\n"
         + "\n".join(match_lines)
     )
     if settings.sandbox_mode:
@@ -564,7 +641,7 @@ async def setmlbb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await require_private(update, context):
         return
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /setmlbb <mlbb_id>")
+        await update.effective_message.reply_text("ℹ️ Usage: `/setmlbb <mlbb_id>`\nExample: `/setmlbb 8204763246`")
         return
     from db.mongo import get_db
 
@@ -573,7 +650,7 @@ async def setmlbb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         {"_id": str(user["_id"])},
         {"$set": {"mlbb_id": context.args[0].strip(), "mlbb_verified": False, "last_active": utcnow()}},
     )
-    await update.effective_message.reply_text("✅ MLBB ID saved.")
+    await update.effective_message.reply_text("✅ MLBB ID saved successfully.")
 
 
 @guard_handler
@@ -586,17 +663,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await balance_command(update, context)
     elif action == "menu:games":
         await query.message.reply_text(
-            "🎮 Choose a game and create a challenge:\n\n"
-            "/challenge <amount> dice [normal|crazy] [1|2|3]\n"
-            "/challenge <amount> football [normal|crazy] [1|2|3]\n"
-            "/challenge <amount> chess\n"
-            "/challenge <amount> mlbb",
+            "🎮 Start a game with `/play`.\nExample: `/play 10 dice normal 2`",
             reply_markup=games_keyboard(),
         )
     elif action == "menu:deposit":
         await deposit_command(update, context)
     elif action == "menu:withdraw":
-        await query.message.reply_text("Use /withdraw <amount> <address>")
+        await query.message.reply_text("💸 Use `/cashout <amount> <address>` (legacy: `/withdraw ...`)")
     elif action == "menu:profile":
         await profile_command(update, context)
     elif action == "menu:history":
@@ -604,18 +677,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action == "menu:leaderboard":
         await leaderboard_command(update, context)
     elif action == "menu:tip":
-        await query.message.reply_text("Use /tip <@username|user_id> <amount>")
+        await query.message.reply_text("🎁 Use `/tip <@username|user_id> <amount>`")
     elif action == "menu:admin":
         if not is_private_chat(update):
-            await query.message.reply_text("Admin panel is available in private chat only.")
+            await query.message.reply_text("🔒 Admin panel works in private chat only.")
             return
         if update.effective_user.id not in settings.admin_ids:
-            await query.message.reply_text("Unauthorized.")
+            await query.message.reply_text("🚫 Unauthorized.")
             return
         await query.message.reply_text(
             "\n".join(
                 [
-                    "Admin commands:",
+                    "🛡️ Admin commands:",
                     "/add_balance <user_id> <amount> [reason]",
                     "/deduct_balance <user_id> <amount> [reason]",
                     "/approve_withdrawal <withdrawal_id>",
@@ -642,14 +715,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Per-game correct usage hint
         selected = action.split(":", 1)[1]
         if selected in ("dice", "football"):
-            hint = f"/challenge <amount> {selected} [normal|crazy] [1|2|3]"
+            hint = f"/play <amount> {selected} [normal|crazy] [1|2|3]"
         elif selected == "chess":
-            hint = "/challenge <amount> chess"
+            hint = "/play <amount> chess"
         elif selected == "mlbb":
-            hint = "/challenge <amount> mlbb"
+            hint = "/play <amount> mlbb"
         else:
-            hint = f"/challenge <amount> {selected}"
-        await query.message.reply_text(f"🎮 {selected.title()} — Create a challenge:\n{hint}")
+            hint = f"/play <amount> {selected}"
+        await query.message.reply_text(f"🎮 {selected.title()} ready.\nExample: `{hint}`")
 
 
 @guard_handler
@@ -673,7 +746,8 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"Possible manual deposit evidence from {display_name(user)} ({user['_id']})\n"
+                    f"📥 Possible manual deposit evidence\n"
+                    f"User: {display_name(user)} (`{user['_id']}`)\n"
                     f"Message: {text}\n"
                     f"Approve with /approve_deposit {user['_id']} <amount> <crypto>"
                 ),
@@ -681,5 +755,5 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             pass
     await update.effective_message.reply_text(
-        "Your message was forwarded to admins for manual deposit review."
+        "✅ Your message was forwarded to admins for manual deposit review."
     )
