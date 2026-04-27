@@ -374,6 +374,13 @@ async def lifespan(_: Starlette):
     await telegram_app.initialize()
     await telegram_app.start()
     await _install_bot_send_limits(telegram_app)
+    logger.info(
+        "Boot role=%s webhook_url=%s max_update_concurrency=%s send_concurrency=%s",
+        settings.app_role,
+        settings.webhook_url or "<empty>",
+        settings.max_update_concurrency,
+        settings.telegram_send_concurrency,
+    )
 
     webhook_target = f"{settings.webhook_url}/webhook"
     if settings.app_role == "web":
@@ -395,11 +402,6 @@ async def lifespan(_: Starlette):
     finally:
         logger.info("Shutting down role=%s...", settings.app_role)
         if telegram_app is not None:
-            if settings.app_role == "web":
-                try:
-                    await telegram_app.bot.delete_webhook(drop_pending_updates=False)
-                except Exception:
-                    pass
             await telegram_app.stop()
             await telegram_app.shutdown()
         await close_ton_client()
