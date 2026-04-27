@@ -59,8 +59,6 @@ from utils import (
     ANTI_CHEAT_WARNING,
     display_name,
     format_amount,
-    limited_telegram_call,
-    set_telegram_send_semaphore,
 )
 
 ALLOWED_UPDATES = [
@@ -103,24 +101,6 @@ async def ensure_webhook_consistency(context: ContextTypes.DEFAULT_TYPE) -> None
             logger.warning("Webhook reconciled from %s to %s", info.url, target)
     except Exception as exc:
         logger.exception("ensure_webhook_consistency failed: %s", exc)
-
-
-async def _install_bot_send_limits(application: Application) -> None:
-    semaphore = asyncio.Semaphore(settings.telegram_send_concurrency)
-    set_telegram_send_semaphore(semaphore)
-
-    for method_name in ("send_message", "edit_message_text", "send_dice"):
-        original = getattr(application.bot, method_name, None)
-        if original is None:
-            continue
-
-        async def _wrapper(*args, __orig=original, **kwargs):
-            return await limited_telegram_call(__orig, *args, **kwargs)
-
-        try:
-            setattr(application.bot, method_name, _wrapper)
-        except Exception as exc:
-            logger.warning("Could not wrap bot.%s for send limit: %s", method_name, exc)
 
 
 async def _process_update_queued(update: Update) -> None:
@@ -190,7 +170,20 @@ async def game_expiry(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_telegram_application() -> Application:
-    application = Application.builder().token(settings.telegram_bot_token).updater(None).build()
+    builder = Application.builder().token(settings.telegram_bot_token).updater(None)
+    try:
+        from telegram.ext import AIORateLimiter
+
+        builder = builder.rate_limiter(
+            AIORateLimiter(
+                overall_max_rate=settings.telegram_send_concurrency,
+                overall_time_period=1,
+            )
+        )
+        logger.info("PTB AIORateLimiter enabled (overall_max_rate=%s/s)", settings.telegram_send_concurrency)
+    except Exception as exc:
+        logger.warning("PTB AIORateLimiter unavailable; continuing without bot-wide limiter: %s", exc)
+    application = builder.build()
     application.admin_ids = settings.admin_ids
     user_handlers = [
         ("start", start_command),
@@ -393,7 +386,6 @@ async def lifespan(_: Starlette):
     telegram_app = build_telegram_application()
     await telegram_app.initialize()
     await telegram_app.start()
-    await _install_bot_send_limits(telegram_app)
     logger.info(
         "Boot role=%s webhook_url=%s max_update_concurrency=%s send_concurrency=%s",
         settings.app_role,
